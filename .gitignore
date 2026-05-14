@@ -1,0 +1,109 @@
+# =========================
+# OS / System
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Python cache
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+.conda/
+conda-meta/
+
+# =========================
+# IDE / Editor
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# =========================
+# Logs
+# =========================
+*.log
+log/
+logs/
+**/log/
+**/logs/
+metrics.json
+**/metrics.json
+
+# =========================
+# Data / Datasets
+# =========================
+data/
+dataset/
+datasets/
+Data/
+Dataset/
+Datasets/
+**/data/
+**/dataset/
+**/datasets/
+
+# =========================
+# Training outputs
+# =========================
+runs/
+outputs/
+output/
+results/
+checkpoints/
+checkpoint/
+weights/
+models/
+saved_models/
+**/runs/
+**/outputs/
+**/output/
+**/results/
+**/checkpoints/
+**/checkpoint/
+**/weights/
+**/models/
+**/saved_models/
+
+# =========================
+# Model / large generated files
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.mat
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# =========================
+# Local config / secrets
+# =========================
+.env
+*.env
+*.local
+config.local.*
+secrets.*

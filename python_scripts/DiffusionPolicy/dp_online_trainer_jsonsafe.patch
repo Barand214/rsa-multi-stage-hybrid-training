@@ -1,0 +1,49 @@
+--- dp_online_trainer.py
++++ dp_online_trainer_jsonsafe.py
+@@ -176,6 +176,23 @@
+         return float(np.mean(self.values)) if self.values else 0.0
+ 
+ 
++def _make_json_safe(obj: Any) -> Any:
++    """Recursively convert numpy / torch objects into JSON-serializable Python types."""
++    if isinstance(obj, dict):
++        return {str(k): _make_json_safe(v) for k, v in obj.items()}
++    if isinstance(obj, (list, tuple)):
++        return [_make_json_safe(v) for v in obj]
++    if isinstance(obj, Path):
++        return str(obj)
++    if isinstance(obj, np.ndarray):
++        return obj.tolist()
++    if isinstance(obj, np.generic):
++        return obj.item()
++    if torch.is_tensor(obj):
++        return obj.detach().cpu().tolist()
++    return obj
++
++
+ # ---------------------------------------------------------------------------
+ # Trainer
+ # ---------------------------------------------------------------------------
+@@ -204,7 +221,7 @@
+ 
+     def _write_config(self) -> None:
+         with self.config_path.open("w", encoding="utf-8") as f:
+-            json.dump(asdict(self.cfg), f, ensure_ascii=False, indent=2)
++            json.dump(_make_json_safe(asdict(self.cfg)), f, ensure_ascii=False, indent=2)
+ 
+     def close(self) -> None:
+         if self.cfg.close_server_on_exit:
+@@ -451,11 +468,11 @@
+     def _record_episode(self, summary: Dict[str, Any]) -> None:
+         self.stats_history.append(summary)
+         with self.metrics_path.open("a", encoding="utf-8") as f:
+-            f.write(json.dumps(summary, ensure_ascii=False) + "\n")
++            f.write(json.dumps(_make_json_safe(summary), ensure_ascii=False) + "\n")
+ 
+     def _write_summary(self, summary: Dict[str, Any]) -> None:
+         with self.summary_path.open("w", encoding="utf-8") as f:
+-            json.dump(summary, f, ensure_ascii=False, indent=2)
++            json.dump(_make_json_safe(summary), f, ensure_ascii=False, indent=2)
+ 
+     # ------------------------------
+     # Public train/eval APIs
