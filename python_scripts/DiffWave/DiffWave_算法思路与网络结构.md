@@ -1,4 +1,4 @@
-# DiffWave 算法思路与网络结构说明
+﻿# DiffWave 算法思路与网络结构说明
 
 ## 1. 总体思路
 
@@ -23,12 +23,12 @@ Webots Train_main.py
 
 ## 2. 双 Python + GPU 运行方式
 
-Webots 控制器继续使用 Webots 自带/兼容的 Python 3.7 环境，因为 Webots 的 `controller` API 依赖该运行时。DiffWave 网络训练放在 `D:\anaconda\envs\mission\python.exe` 中运行，用于调用 Python 3.11 和 CUDA 版本 PyTorch。
+Webots 控制器继续使用 Webots 自带/兼容的 Python 3.7 环境，因为 Webots 的 `controller` API 依赖该运行时。DiffWave 网络训练放在 `%DIFFWAVE_MISSION_PYTHON%` 中运行，用于调用 Python 3.11 和 CUDA 版本 PyTorch。
 
 Webots 侧通过 `python_scripts/DiffWave/diffwave_gpu_client.py` 自动启动 GPU 服务：
 
 ```text
-D:\anaconda\envs\mission\python.exe -m python_scripts.DiffWave.diffwave_gpu_service
+%DIFFWAVE_MISSION_PYTHON% -m python_scripts.DiffWave.diffwave_gpu_service
 ```
 
 两边通过 socket + pickle protocol 4 通信，默认端口为 `127.0.0.1:8876`。Webots 是主控流程，GPU 服务只作为算法服务被调用。

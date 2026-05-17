@@ -12,7 +12,7 @@ if os.name == 'nt' and sys.version_info >= (3, 8):  # we need to explicitly list
     os.add_dll_directory(os.path.join(robotis_libraries, 'managers'))
     os.add_dll_directory(os.path.join(robotis_libraries, 'robotis-op2'))
 
-sys.path.append('D:/webots-R2021a/Webots/projects/robots/robotis/darwin-op/libraries/python37')
+sys.path.append('D:/Dev/Tools/Webots/projects/robots/robotis/darwin-op/libraries/python37')
 
 from sys import version_info as _swig_python_version_info
 if _swig_python_version_info < (2, 7, 0):

@@ -16,7 +16,7 @@ import numpy as np
 PICKLE_PROTOCOL = 4
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8876
-DEFAULT_MISSION_PYTHON = r"D:\anaconda\envs\mission\python.exe"
+DEFAULT_MISSION_PYTHON = os.environ.get("DIFFWAVE_MISSION_PYTHON")
 
 
 def _project_root():
@@ -60,7 +60,7 @@ class DiffWaveGPUClient(object):
     ):
         self.host = str(host)
         self.port = int(port)
-        self.mission_python = mission_python or os.environ.get("DIFFWAVE_MISSION_PYTHON", DEFAULT_MISSION_PYTHON)
+        self.mission_python = mission_python or os.environ.get("DIFFWAVE_MISSION_PYTHON") or DEFAULT_MISSION_PYTHON
         self.project_root = project_root or _project_root()
         self.timeout_s = float(timeout_s)
         self.retry_attempts = int(retry_attempts)
@@ -90,6 +90,12 @@ class DiffWaveGPUClient(object):
 
         if not self.auto_start:
             return
+
+        if not self.mission_python:
+            raise RuntimeError(
+                "DiffWave mission Python is not configured. "
+                "Set DIFFWAVE_MISSION_PYTHON before using TRAIN_ALGO=diffwave."
+            )
 
         if not os.path.isfile(self.mission_python):
             raise RuntimeError("mission Python not found: %s" % self.mission_python)

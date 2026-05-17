@@ -176,7 +176,7 @@ def DQN_episoid(model_path=None):
             # 添加动作到日志
             log_writer_catch.add_action(a)
             # 执行一步动作
-            next_state, reward, done, good, goal, count = env.step(robot_state, a, steps, catch_flag, gps1, gps2, gps3, gps4, img_name)
+            next_state, reward, done, good, goal, count = env.step(robot_state, a, a, steps, catch_flag, gps1, gps2, gps3, gps4, img_name)
             print(f'catch_flag: {catch_flag}')
             print(f'done: {done}')
             

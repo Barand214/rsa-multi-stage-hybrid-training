@@ -1,3 +1,39 @@
+import os
+
+WEBOTS_CONDA_ENV = r"D:\Dev\Env\Python\Miniconda3\envs\webots"
+RESET_FLAG_PATH = 'D:\\Dev\\Projects\\RSA\\Multi-Stage_Hybrid_Training\\python_scripts\\resetFlag.txt'
+
+
+def _prepend_runtime_dll_paths():
+    candidate_paths = [
+        WEBOTS_CONDA_ENV,
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "mingw-w64", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "usr", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "DLLs"),
+        os.path.join(WEBOTS_CONDA_ENV, "Scripts"),
+        os.path.join(WEBOTS_CONDA_ENV, "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Lib", "site-packages", "torch", "lib"),
+    ]
+
+    existing = os.environ.get("PATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    normalized = {os.path.normcase(path) for path in parts}
+
+    prepend = []
+    for path in candidate_paths:
+        if os.path.isdir(path) and os.path.normcase(path) not in normalized:
+            prepend.append(path)
+
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + parts)
+        print("Prepended runtime DLL paths:", flush=True)
+        for path in prepend:
+            print("  " + path, flush=True)
+
+
+_prepend_runtime_dll_paths()
+
 from controller import Supervisor, Node
 import numpy as np
 import operator
@@ -67,9 +103,16 @@ class SupervisorRobot:
         self.wait(100)
         
     def resetsimulation(self):
+        if not os.path.isfile(RESET_FLAG_PATH):
+            reset_flag_dir = os.path.dirname(RESET_FLAG_PATH)
+            if reset_flag_dir and not os.path.isdir(reset_flag_dir):
+                os.makedirs(reset_flag_dir)
+            with open(RESET_FLAG_PATH, 'w') as file:
+                file.write('1')
+
         self.robot.step(self.timestep)
         while True:
-            with open('E:\\webotsone\\Multi-Stage_Hybrid_Training\\python_scripts\\resetFlag.txt', 'r') as file:
+            with open(RESET_FLAG_PATH, 'r') as file:
                 flag = file.read().strip()
 
             if flag == '0':
@@ -78,7 +121,7 @@ class SupervisorRobot:
                 self.reset()
                 self.wait(200)
 
-                with open('E:\\webotsone\\Multi-Stage_Hybrid_Training\\python_scripts\\resetFlag.txt', 'w') as file:
+                with open(RESET_FLAG_PATH, 'w') as file:
                     file.write('1')
 
                 print("[Supervisor] reset finished")

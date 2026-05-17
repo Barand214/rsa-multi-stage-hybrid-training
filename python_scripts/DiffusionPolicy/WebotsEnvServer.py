@@ -26,6 +26,7 @@ Protocol
 from __future__ import print_function
 
 import argparse
+import os
 import pickle
 import socket
 import struct
@@ -36,8 +37,16 @@ import numpy as np
 from PIL import Image
 from controller import Robot
 import sys
-sys.path.append('E:\\webotsone\\Multi-Stage_Hybrid_Training')
-sys.path.append('C:\\Users\\lenovo\\AppData\\Local\\Programs\\Webots\\projects\\robots\\robotis\\darwin-op\\libraries\\managers')
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WEBOTS_HOME = r"D:\Dev\Tools\Webots"
+sys.path.append(PROJECT_ROOT)
+for manager_path in (
+    os.path.join(WEBOTS_HOME, "projects", "robots", "robotis", "darwin-op", "libraries", "managers"),
+    os.path.join(WEBOTS_HOME, "resources", "projects", "robots", "robotis", "darwin-op", "libraries", "managers"),
+):
+    if os.path.isdir(manager_path):
+        sys.path.append(manager_path)
+        break
 
 from python_scripts.Webots_interfaces import Environment
 

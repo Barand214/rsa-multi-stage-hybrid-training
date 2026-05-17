@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-sys.path.append('D:/SoftWare/Webots/projects/robots/robotis/darwin-op/libraries/python37')
+sys.path.append('D:/Dev/Tools/Webots/projects/robots/robotis/darwin-op/libraries/python37')
 from controller import Robot, Motor, Motion, LED, Camera, Gyro, Accelerometer, PositionSensor, GPS
 from managers import RobotisOp2GaitManager, RobotisOp2MotionManager
 

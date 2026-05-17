@@ -6,16 +6,57 @@ import sys
 THIS_FILE = os.path.abspath(__file__)
 CONTROLLER_DIR = os.path.dirname(THIS_FILE)
 PROJECT_ROOT = os.path.abspath(os.path.join(CONTROLLER_DIR, "..", ".."))
+WEBOTS_HOME = r"D:\Dev\Tools\Webots"
+WEBOTS_CONDA_ENV = r"D:\Dev\Env\Python\Miniconda3\envs\webots"
 
 sys.path.append(PROJECT_ROOT)
-sys.path.append(r"C:\Users\lenovo\AppData\Local\Programs\Webots\projects\robots\robotis\darwin-op\libraries\managers")
+
+
+def _prepend_runtime_dll_paths():
+    candidate_paths = [
+        WEBOTS_CONDA_ENV,
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "mingw-w64", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "usr", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Library", "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "DLLs"),
+        os.path.join(WEBOTS_CONDA_ENV, "Scripts"),
+        os.path.join(WEBOTS_CONDA_ENV, "bin"),
+        os.path.join(WEBOTS_CONDA_ENV, "Lib", "site-packages", "torch", "lib"),
+    ]
+
+    existing = os.environ.get("PATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    normalized = {os.path.normcase(path) for path in parts}
+
+    prepend = []
+    for path in candidate_paths:
+        if os.path.isdir(path) and os.path.normcase(path) not in normalized:
+            prepend.append(path)
+
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend + parts)
+        print("Prepended runtime DLL paths:", flush=True)
+        for path in prepend:
+            print("  " + path, flush=True)
+
+
+_prepend_runtime_dll_paths()
+
+DARWIN_MANAGER_CANDIDATES = [
+    os.path.join(WEBOTS_HOME, "projects", "robots", "robotis", "darwin-op", "libraries", "managers"),
+    os.path.join(WEBOTS_HOME, "resources", "projects", "robots", "robotis", "darwin-op", "libraries", "managers"),
+]
+for manager_path in DARWIN_MANAGER_CANDIDATES:
+    if os.path.isdir(manager_path):
+        sys.path.append(manager_path)
+        break
 
 from python_scripts.Project_config import path_list
 
 
-PYTHON_37_EXPECTED = r"D:\anaconda\envs\webots\python.exe"
-DEFAULT_DP_MISSION_PYTHON = r"D:\anaconda\envs\mission\python.exe"
-DEFAULT_ALGO = os.environ.get("TRAIN_ALGO", "diffusionpolicy")
+PYTHON_37_EXPECTED = r"D:\Dev\Env\Python\Miniconda3\envs\webots\python.exe"
+DEFAULT_DP_MISSION_PYTHON = os.environ.get("DIFFUSION_POLICY_MISSION_PYTHON")
+DEFAULT_ALGO = os.environ.get("TRAIN_ALGO", "dqn")
 
 
 def _warn_python_runtime():
@@ -81,7 +122,7 @@ def _get_selected_algo():
             return selected
 
     selected = _normalize_algo_name(DEFAULT_ALGO)
-    return selected or "diffwave"
+    return selected or "dqn"
 
 
 def _run_dqn():
@@ -108,8 +149,13 @@ def _run_diffusion_policy():
         "DP_SAVE_DIR",
         os.path.join(PROJECT_ROOT, "python_scripts", "DiffusionPolicy", "checkpoint"),
     )
-    mission_python = os.environ.get("DIFFUSION_POLICY_MISSION_PYTHON", DEFAULT_DP_MISSION_PYTHON)
+    mission_python = os.environ.get("DIFFUSION_POLICY_MISSION_PYTHON") or DEFAULT_DP_MISSION_PYTHON
 
+    if not mission_python:
+        raise RuntimeError(
+            "Diffusion Policy mission Python is not configured. "
+            "Set DIFFUSION_POLICY_MISSION_PYTHON before using TRAIN_ALGO=diffusionpolicy."
+        )
     if not os.path.isfile(mission_python):
         raise RuntimeError("Diffusion Policy mission Python not found: %s" % mission_python)
 

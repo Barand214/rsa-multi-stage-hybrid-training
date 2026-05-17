@@ -9,7 +9,7 @@ import math
 
 from numpy import dtype
 
-sys.path.append('D:/SoftWare/Webots/projects/robots/robotis/darwin-op/libraries/python37')
+sys.path.append('D:/Dev/Tools/Webots/projects/robots/robotis/darwin-op/libraries/python37')
 from managers import RobotisOp2GaitManager, RobotisOp2MotionManager
 from RobotRun1 import RobotRun
 from replay_memory import ReplayMemory as replayMemory

@@ -5,7 +5,7 @@ from PIL import Image
 import numpy as np
 import torch
 import shutil
-sys.path.append('D:/Webots/Webots2021a/Webots/projects/robots/robotis/darwin-op/libraries/python37')
+sys.path.append('D:/Dev/Tools/Webots/projects/robots/robotis/darwin-op/libraries/python37')
 #from managers import RobotisOp2GaitManager, RobotisOp2MotionManager
 from python_scripts.Project_config import path_list
 
