@@ -107,3 +107,6 @@ saved_models/
 *.local
 config.local.*
 secrets.*
+python_scripts/Project_config.py
+controllers/Train_main/img*.png
+worlds/*.wbproj

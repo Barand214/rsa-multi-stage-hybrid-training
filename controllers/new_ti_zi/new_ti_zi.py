@@ -1,7 +1,14 @@
 import os
+import sys
 
-WEBOTS_CONDA_ENV = r"D:\Dev\Env\Python\Miniconda3\envs\webots"
-RESET_FLAG_PATH = 'D:\\Dev\\Projects\\RSA\\Multi-Stage_Hybrid_Training\\python_scripts\\resetFlag.txt'
+THIS_FILE = os.path.abspath(__file__)
+CONTROLLER_DIR = os.path.dirname(THIS_FILE)
+PROJECT_ROOT = os.path.abspath(os.path.join(CONTROLLER_DIR, "..", ".."))
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
+from python_scripts.Project_config import RESET_FLAG_PATH, WEBOTS_CONDA_ENV
 
 
 def _prepend_runtime_dll_paths():

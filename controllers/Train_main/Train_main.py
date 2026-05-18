@@ -6,10 +6,10 @@ import sys
 THIS_FILE = os.path.abspath(__file__)
 CONTROLLER_DIR = os.path.dirname(THIS_FILE)
 PROJECT_ROOT = os.path.abspath(os.path.join(CONTROLLER_DIR, "..", ".."))
-WEBOTS_HOME = r"D:\Dev\Tools\Webots"
-WEBOTS_CONDA_ENV = r"D:\Dev\Env\Python\Miniconda3\envs\webots"
 
 sys.path.append(PROJECT_ROOT)
+
+from python_scripts.Project_config import WEBOTS_HOME, WEBOTS_CONDA_ENV, PYTHON_37_EXPECTED, path_list
 
 
 def _prepend_runtime_dll_paths():
@@ -50,11 +50,6 @@ for manager_path in DARWIN_MANAGER_CANDIDATES:
     if os.path.isdir(manager_path):
         sys.path.append(manager_path)
         break
-
-from python_scripts.Project_config import path_list
-
-
-PYTHON_37_EXPECTED = r"D:\Dev\Env\Python\Miniconda3\envs\webots\python.exe"
 DEFAULT_DP_MISSION_PYTHON = os.environ.get("DIFFUSION_POLICY_MISSION_PYTHON")
 DEFAULT_ALGO = os.environ.get("TRAIN_ALGO", "dqn")
 
