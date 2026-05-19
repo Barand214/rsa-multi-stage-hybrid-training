@@ -4,9 +4,9 @@ import re
 
 import numpy as np
 
-from python_scripts.DiffWave.DiffWave_episoid_2_1 import DiffWave_tai_episoid
-from python_scripts.DiffWave.diffwave_gpu_client import DiffWaveGPUClient
-from python_scripts.DiffWave.DiffWave_log_write import Log_write
+from python_scripts.WaveGrad.WaveGrad_episoid_2_1 import WaveGrad_tai_episoid
+from python_scripts.WaveGrad.wavegrad_gpu_client import WaveGradGPUClient
+from python_scripts.WaveGrad.WaveGrad_log_write import Log_write
 from python_scripts.Project_config import Darwin_config, gps_goal1, path_list
 from python_scripts.utils.sensor_utils import reset_environment, wait_for_sensors_stable
 
@@ -254,7 +254,7 @@ def _get_grasp_contact(env):
 
 
 def _step_catch(env, action_shoulder, action_arm, steps):
-    from python_scripts.DiffWave.RobotRun1 import RobotRun
+    from python_scripts.WaveGrad.RobotRun1 import RobotRun
 
     discrete_action = [1, 1]
     continuous_action = [float(action_shoulder), float(action_arm)]
@@ -267,8 +267,8 @@ def _step_catch(env, action_shoulder, action_arm, steps):
     return next_state, float(env_reward), int(done), bool(catch_success)
 
 
-def _run_diffwave_catch_tests(env, gpu, checkpoint_episode, max_steps_per_test_episode):
-    print(f"\n--- Episode {checkpoint_episode}: testing DiffWave catch model ({NUM_TEST_EPISODES} valid runs) ---")
+def _run_wavegrad_catch_tests(env, gpu, checkpoint_episode, max_steps_per_test_episode):
+    print(f"\n--- Episode {checkpoint_episode}: testing WaveGrad catch model ({NUM_TEST_EPISODES} valid runs) ---")
     gpu.set_mode(stage="catch", mode="eval")
     successful_test_episodes = 0
     valid_test_cnt = 0
@@ -390,30 +390,30 @@ def _run_diffwave_catch_tests(env, gpu, checkpoint_episode, max_steps_per_test_e
     return successful_test_episodes, test_success_rate
 
 
-def DiffWave_episoid_1(model_path=None, max_steps_per_episode=22):
+def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
     from python_scripts.Webots_interfaces import Environment
 
     max_steps_per_episode = min(max_steps_per_episode, 22)
-    gpu = DiffWaveGPUClient(
-        host=os.environ.get("DIFFWAVE_GPU_HOST", "127.0.0.1"),
-        port=int(os.environ.get("DIFFWAVE_GPU_PORT", "8876")),
+    gpu = WaveGradGPUClient(
+        host=os.environ.get("WAVEGRAD_GPU_HOST", "127.0.0.1"),
+        port=int(os.environ.get("WAVEGRAD_GPU_PORT", "8877")),
     )
     init_info = gpu.initialize(model_path=model_path, max_steps_per_episode=max_steps_per_episode)
 
     log_writer_catch = Log_write()
     log_writer_tai = Log_write()
 
-    catch_checkpoint_dir = path_list["model_path_catch_DiffWave"]
-    tai_checkpoint_dir = path_list["model_path_tai_DiffWave"]
+    catch_checkpoint_dir = path_list["model_path_catch_WaveGrad"]
+    tai_checkpoint_dir = path_list["model_path_tai_WaveGrad"]
     _ensure_dir(catch_checkpoint_dir)
     _ensure_dir(tai_checkpoint_dir)
-    _ensure_dir(path_list["catch_log_path_DiffWave"])
-    _ensure_dir(path_list["tai_log_path_DiffWave"])
+    _ensure_dir(path_list["catch_log_path_WaveGrad"])
+    _ensure_dir(path_list["tai_log_path_WaveGrad"])
 
-    log_file_latest_catch = _next_log_file(path_list["catch_log_path_DiffWave"], "catch_log")
-    log_file_latest_tai = _next_log_file(path_list["tai_log_path_DiffWave"], "tai_log")
-    print(f"Using DiffWave catch log: {log_file_latest_catch}")
-    print(f"Using DiffWave tai log: {log_file_latest_tai}")
+    log_file_latest_catch = _next_log_file(path_list["catch_log_path_WaveGrad"], "catch_log")
+    log_file_latest_tai = _next_log_file(path_list["tai_log_path_WaveGrad"], "tai_log")
+    print(f"Using WaveGrad catch log: {log_file_latest_catch}")
+    print(f"Using WaveGrad tai log: {log_file_latest_tai}")
 
     episode_start = int(init_info.get("episode_start", 0))
     tai_episode = int(init_info.get("tai_episode", 1))
@@ -424,7 +424,7 @@ def DiffWave_episoid_1(model_path=None, max_steps_per_episode=22):
 
     try:
         for episode in range(episode_start, episode_start + 10000):
-            print(f"<<<<<<<<< DiffWave episode {episode}")
+            print(f"<<<<<<<<< WaveGrad episode {episode}")
             train_schedule = _catch_train_schedule(episode)
             env.reset()
             env.wait(500)
@@ -587,7 +587,7 @@ def DiffWave_episoid_1(model_path=None, max_steps_per_episode=22):
             print(f"Episode return: {episode_return:.2f}, success: {success_flag1}, loss: {loss_total:.4f}")
 
             if episode > 0 and episode % CHECKPOINT_INTERVAL == 0:
-                successful_test_episodes, test_success_rate = _run_diffwave_catch_tests(
+                successful_test_episodes, test_success_rate = _run_wavegrad_catch_tests(
                     env=env,
                     gpu=gpu,
                     checkpoint_episode=episode,
@@ -617,8 +617,8 @@ def DiffWave_episoid_1(model_path=None, max_steps_per_episode=22):
             log_writer_catch.save_catch(log_file_latest_catch)
 
             if success_flag1 == 1:
-                print("Catch succeeded; starting DiffWave tai training.")
-                DiffWave_tai_episoid(
+                print("Catch succeeded; starting WaveGrad tai training.")
+                WaveGrad_tai_episoid(
                     gpu=gpu,
                     existing_env=env,
                     total_episode=episode,

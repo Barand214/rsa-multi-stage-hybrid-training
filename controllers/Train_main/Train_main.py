@@ -100,6 +100,7 @@ def _normalize_algo_name(name):
         "diffusionpolicy": "diffusionpolicy",
         "ppo": "diffwave",
         "sac": "sac",
+        "wavegrad": "wavegrad",
     }
     return alias.get(text, "")
 
@@ -132,6 +133,13 @@ def _run_diffwave():
 
     print("Training with DiffWave reward-weighted diffusion.")
     DiffWave_episoid_1()
+
+
+def _run_wavegrad():
+    from python_scripts.WaveGrad.WaveGrad_episoid_1 import WaveGrad_episoid_1
+
+    print("Training with WaveGrad reward-weighted diffusion.")
+    WaveGrad_episoid_1()
 
 
 def _run_diffusion_policy():
@@ -227,12 +235,14 @@ def main():
         print("Compatibility note: 'ppo' now maps to DiffWave, not PPO.")
 
     print("Selected training algorithm: %s" % algo)
-    print("Available algorithms: dqn / sac / diffwave / diffusionpolicy; ppo is a DiffWave compatibility alias.")
+    print("Available algorithms: dqn / sac / diffwave / wavegrad / diffusionpolicy; ppo is a DiffWave compatibility alias.")
 
     if algo == "dqn":
         _run_dqn()
     elif algo == "diffwave":
         _run_diffwave()
+    elif algo == "wavegrad":
+        _run_wavegrad()
     elif algo == "diffusionpolicy":
         _run_diffusion_policy()
     elif algo == "sac":

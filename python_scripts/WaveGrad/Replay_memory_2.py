@@ -1,4 +1,4 @@
-"""Tai-stage replay memory helpers for DiffWave training."""
+"""Tai-stage replay memory helpers for WaveGrad training."""
 
 import collections
 

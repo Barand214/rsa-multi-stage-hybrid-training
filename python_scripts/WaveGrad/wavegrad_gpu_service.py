@@ -1,8 +1,8 @@
-"""DiffWave GPU algorithm service.
+"""WaveGrad GPU algorithm service.
 
 This process is launched by the Webots controller, but it runs with the
 mission Python environment. Webots stays in charge of the simulation loop;
-this service only owns DiffWave policies, replay buffers, learning, and
+this service only owns WaveGrad policies, replay buffers, learning, and
 checkpoints.
 """
 
@@ -23,14 +23,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import torch
 
-from python_scripts.DiffWave.DiffWave_policy import DiffWaveAgent
-from python_scripts.DiffWave.DiffWave_policy_2 import DiffWaveTaiAgent
+from python_scripts.WaveGrad.WaveGrad_policy import WaveGradAgent
+from python_scripts.WaveGrad.WaveGrad_policy_2 import WaveGradTaiAgent
 from python_scripts.Project_config import device, path_list
 
 
 PICKLE_PROTOCOL = 4
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8876
+DEFAULT_PORT = 8877
 
 
 def _recv_exact(sock_obj: socket.socket, size: int) -> bytes:
@@ -67,10 +67,10 @@ def _extract_first_number(file_path: str) -> int:
 
 def _catch_checkpoint_sort_key(file_path: str) -> Tuple[int, int]:
     name = os.path.basename(file_path)
-    success_match = re.search(r"diffwave_model_success_(\d+)_(\d+)_", name)
+    success_match = re.search(r"wavegrad_model_success_(\d+)_(\d+)_", name)
     if success_match:
         return int(success_match.group(1)), int(success_match.group(2))
-    model_match = re.search(r"diffwave_model_(\d+)\.ckpt", name)
+    model_match = re.search(r"wavegrad_model_(\d+)\.ckpt", name)
     if model_match:
         return int(model_match.group(1)), 0
     return _extract_first_number(file_path), 0
@@ -79,7 +79,7 @@ def _catch_checkpoint_sort_key(file_path: str) -> Tuple[int, int]:
 def _parse_catch_success_checkpoint_name(file_path: str) -> Tuple[int, int, Optional[float]]:
     name = os.path.basename(file_path)
     match = re.search(
-        r"diffwave_model_success_(\d+)_(\d+)_([+-]?\d+(?:p\d+)?|[+-]?\d+(?:\.\d+)?)\.ckpt$",
+        r"wavegrad_model_success_(\d+)_(\d+)_([+-]?\d+(?:p\d+)?|[+-]?\d+(?:\.\d+)?)\.ckpt$",
         name,
     )
     if not match:
@@ -128,7 +128,7 @@ def _read_catch_checkpoint_rank(file_path: str) -> Tuple[Optional[float], int]:
     try:
         checkpoint = _torch_load_checkpoint(file_path, map_location="cpu")
     except Exception as exc:
-        print("Could not inspect DiffWave catch checkpoint %s: %s" % (file_path, exc), flush=True)
+        print("Could not inspect WaveGrad catch checkpoint %s: %s" % (file_path, exc), flush=True)
         return None, episode
 
     if not isinstance(checkpoint, dict):
@@ -139,14 +139,14 @@ def _read_catch_checkpoint_rank(file_path: str) -> Tuple[Optional[float], int]:
         episode = checkpoint_episode
 
     score = _checkpoint_float(checkpoint, ("rank_score", "test_success_rate"))
-    if score is None and os.path.basename(file_path) == "best_catch_DiffWave.pth":
+    if score is None and os.path.basename(file_path) == "best_catch_WaveGrad.pth":
         score = _checkpoint_float(checkpoint, ("best_test_success_rate",))
     return score, episode
 
 
 def _select_best_catch_checkpoint(base_dir: str) -> Optional[Tuple[str, Optional[float], int]]:
-    model_files = set(glob.glob(os.path.join(base_dir, "diffwave_model_*.ckpt")))
-    best_path = os.path.join(base_dir, "best_catch_DiffWave.pth")
+    model_files = set(glob.glob(os.path.join(base_dir, "wavegrad_model_*.ckpt")))
+    best_path = os.path.join(base_dir, "best_catch_WaveGrad.pth")
     if os.path.isfile(best_path):
         model_files.add(best_path)
     if not model_files:
@@ -171,7 +171,7 @@ def _select_best_catch_checkpoint(base_dir: str) -> Optional[Tuple[str, Optional
 
 
 def _parse_tai_episode(file_path: str) -> Tuple[int, int]:
-    match = re.search(r"diffwave_model_tai_(\d+)_(\d+)\.ckpt", os.path.basename(file_path))
+    match = re.search(r"wavegrad_model_tai_(\d+)_(\d+)\.ckpt", os.path.basename(file_path))
     if match:
         return int(match.group(1)), int(match.group(2))
     return 0, _extract_first_number(file_path)
@@ -268,7 +268,7 @@ class ModelRanking:
     ) -> Optional[str]:
         new_score = float(new_score)
         safe_score = ("%.2f" % new_score).replace(".", "p")
-        filename = "diffwave_model_success_%d_%d_%s.ckpt" % (episode_id, success_count, safe_score)
+        filename = "wavegrad_model_success_%d_%d_%s.ckpt" % (episode_id, success_count, safe_score)
         final_save_path = os.path.join(base_dir, filename)
         should_save = len(self.rankings) < self.top_n or new_score > self.rankings[0][0]
         if not should_save:
@@ -285,20 +285,20 @@ class ModelRanking:
 
         torch.save(new_checkpoint, final_save_path)
         heapq.heappush(self.rankings, (new_score, final_save_path))
-        print("Saved ranked DiffWave model: %s" % final_save_path, flush=True)
+        print("Saved ranked WaveGrad model: %s" % final_save_path, flush=True)
         return final_save_path
 
 
-class DiffWaveGPUService:
+class WaveGradGPUService:
     def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         self.host = str(host)
         self.port = int(port)
         self.running = True
         self.max_steps_per_episode = 22
-        self.diffwave_catch: Optional[DiffWaveAgent] = None
-        self.diffwave_tai_leg_upper: Optional[DiffWaveTaiAgent] = None
-        self.diffwave_tai_leg_lower: Optional[DiffWaveTaiAgent] = None
-        self.diffwave_tai_ankle: Optional[DiffWaveTaiAgent] = None
+        self.wavegrad_catch: Optional[WaveGradAgent] = None
+        self.wavegrad_tai_leg_upper: Optional[WaveGradTaiAgent] = None
+        self.wavegrad_tai_leg_lower: Optional[WaveGradTaiAgent] = None
+        self.wavegrad_tai_ankle: Optional[WaveGradTaiAgent] = None
         self.model_ranking = ModelRanking(top_n=5)
         self.best_catch_test_success_rate = -1.0
 
@@ -306,8 +306,8 @@ class DiffWaveGPUService:
         cuda_available = bool(torch.cuda.is_available())
         gpu_name = torch.cuda.get_device_name(0) if cuda_available else "none"
         policy_device = "uninitialized"
-        if self.diffwave_catch is not None:
-            policy_device = str(next(self.diffwave_catch.policy.parameters()).device)
+        if self.wavegrad_catch is not None:
+            policy_device = str(next(self.wavegrad_catch.policy.parameters()).device)
         return {
             "sys_executable": sys.executable,
             "torch_version": torch.__version__,
@@ -320,23 +320,23 @@ class DiffWaveGPUService:
     def init_agents(self, model_path: Optional[str] = None, max_steps_per_episode: int = 22) -> Dict[str, Any]:
         self.max_steps_per_episode = min(int(max_steps_per_episode), 22)
         for folder in (
-            path_list["model_path_catch_DiffWave"],
-            path_list["model_path_tai_DiffWave"],
-            path_list["catch_log_path_DiffWave"],
-            path_list["tai_log_path_DiffWave"],
+            path_list["model_path_catch_WaveGrad"],
+            path_list["model_path_tai_WaveGrad"],
+            path_list["catch_log_path_WaveGrad"],
+            path_list["tai_log_path_WaveGrad"],
         ):
             _ensure_dir(folder)
 
-        self.diffwave_catch = DiffWaveAgent(
+        self.wavegrad_catch = WaveGradAgent(
             node_num=19,
             env_information=None,
             trajectory_len=self.max_steps_per_episode,
             action_dim=2,
             replay_action_clip=0.85,
         )
-        self.diffwave_tai_leg_upper = DiffWaveTaiAgent(node_num=19, env_information=None)
-        self.diffwave_tai_leg_lower = DiffWaveTaiAgent(node_num=19, env_information=None)
-        self.diffwave_tai_ankle = DiffWaveTaiAgent(node_num=19, env_information=None)
+        self.wavegrad_tai_leg_upper = WaveGradTaiAgent(node_num=19, env_information=None)
+        self.wavegrad_tai_leg_lower = WaveGradTaiAgent(node_num=19, env_information=None)
+        self.wavegrad_tai_ankle = WaveGradTaiAgent(node_num=19, env_information=None)
 
         episode_start = self._load_catch_model(model_path)
         tai_episode = self._load_tai_model(default_episode=1)
@@ -348,7 +348,7 @@ class DiffWaveGPUService:
                 "best_catch_test_success_rate": float(self.best_catch_test_success_rate),
             }
         )
-        print("DiffWave GPU service initialized.", flush=True)
+        print("WaveGrad GPU service initialized.", flush=True)
         print("sys.executable: %s" % info["sys_executable"], flush=True)
         print("torch: %s" % info["torch_version"], flush=True)
         print("torch.cuda.is_available: %s" % info["cuda_available"], flush=True)
@@ -358,20 +358,20 @@ class DiffWaveGPUService:
         return info
 
     def _require_agents(self) -> None:
-        if self.diffwave_catch is None:
+        if self.wavegrad_catch is None:
             self.init_agents(max_steps_per_episode=self.max_steps_per_episode)
 
     def _load_catch_model(self, model_path: Optional[str]) -> int:
-        assert self.diffwave_catch is not None
+        assert self.wavegrad_catch is not None
 
         target_model = model_path
         is_specified = bool(model_path)
         selected_score: Optional[float] = None
         selected_episode: Optional[int] = None
         if not target_model:
-            selected = _select_best_catch_checkpoint(path_list["model_path_catch_DiffWave"])
+            selected = _select_best_catch_checkpoint(path_list["model_path_catch_WaveGrad"])
             if selected is None:
-                print("No saved DiffWave catch model found; starting from scratch.", flush=True)
+                print("No saved WaveGrad catch model found; starting from scratch.", flush=True)
                 return 0
             target_model, selected_score, selected_episode = selected
 
@@ -382,26 +382,26 @@ class DiffWaveGPUService:
         try:
             checkpoint = _torch_load_checkpoint(target_model, map_location=device)
             if isinstance(checkpoint, dict):
-                if "diffwave_catch" in checkpoint or "policy_catch" in checkpoint:
+                if "wavegrad_catch" in checkpoint or "policy_catch" in checkpoint:
                     _load_policy_state(
-                        self.diffwave_catch,
+                        self.wavegrad_catch,
                         checkpoint,
-                        policy_keys=("diffwave_catch", "policy_catch"),
-                        optimizer_keys=("optimizer_diffwave_catch", "optimizer_catch"),
-                        critic_keys=("critic_diffwave_catch",),
-                        critic_optimizer_keys=("optimizer_critic_diffwave_catch",),
+                        policy_keys=("wavegrad_catch", "policy_catch"),
+                        optimizer_keys=("optimizer_wavegrad_catch", "optimizer_catch"),
+                        critic_keys=("critic_wavegrad_catch",),
+                        critic_optimizer_keys=("optimizer_critic_wavegrad_catch",),
                     )
-                    self.diffwave_catch.load_replay_state(checkpoint.get("replay_diffwave_catch"))
+                    self.wavegrad_catch.load_replay_state(checkpoint.get("replay_wavegrad_catch"))
                 else:
-                    # Legacy checkpoint compatibility only; active catch runtime uses diffwave_catch.
+                    # 仅兼容旧检查点；当前抓取阶段运行时使用wavegrad_catch。
                     legacy_catch_policy_keys = (
-                        "diffwave_shoulder",
+                        "wavegrad_shoulder",
                         "policy_shoulder",
-                        "diffwave_arm",
+                        "wavegrad_arm",
                         "policy_arm",
                     )
                     _load_policy_state(
-                        self.diffwave_catch,
+                        self.wavegrad_catch,
                         checkpoint,
                         policy_keys=legacy_catch_policy_keys,
                         optimizer_keys=(),
@@ -427,10 +427,10 @@ class DiffWaveGPUService:
                     pass
                 if selected_score is None:
                     selected_score = _checkpoint_float(checkpoint, ("rank_score", "test_success_rate"))
-                    if selected_score is None and os.path.basename(target_model) == "best_catch_DiffWave.pth":
+                    if selected_score is None and os.path.basename(target_model) == "best_catch_WaveGrad.pth":
                         selected_score = _checkpoint_float(checkpoint, ("best_test_success_rate",))
             else:
-                _load_compatible_module_state(self.diffwave_catch.policy, checkpoint, "legacy_catch_policy")
+                _load_compatible_module_state(self.wavegrad_catch.policy, checkpoint, "legacy_catch_policy")
                 checkpoint_episode = _catch_checkpoint_sort_key(target_model)[0]
                 episode_start = checkpoint_episode + 1 if checkpoint_episode >= 0 else 0
             source = "specified" if is_specified else "best-success"
@@ -438,7 +438,7 @@ class DiffWaveGPUService:
             if selected_episode is None:
                 selected_episode = checkpoint_episode
             print(
-                "Loaded %s DiffWave catch model: %s; checkpoint episode %d; "
+                "Loaded %s WaveGrad catch model: %s; checkpoint episode %d; "
                 "test success %s; resume episode %d"
                 % (source, target_model, selected_episode, score_text, episode_start),
                 flush=True,
@@ -449,13 +449,13 @@ class DiffWaveGPUService:
             return 0
 
     def _load_tai_model(self, default_episode: int = 1) -> int:
-        assert self.diffwave_tai_leg_upper is not None
-        assert self.diffwave_tai_leg_lower is not None
-        assert self.diffwave_tai_ankle is not None
+        assert self.wavegrad_tai_leg_upper is not None
+        assert self.wavegrad_tai_leg_lower is not None
+        assert self.wavegrad_tai_ankle is not None
 
-        model_files = glob.glob(os.path.join(path_list["model_path_tai_DiffWave"], "diffwave_model_tai_*.ckpt"))
+        model_files = glob.glob(os.path.join(path_list["model_path_tai_WaveGrad"], "wavegrad_model_tai_*.ckpt"))
         if not model_files:
-            print("No saved DiffWave tai model found; starting tai training from scratch.", flush=True)
+            print("No saved WaveGrad tai model found; starting tai training from scratch.", flush=True)
             return int(default_episode)
 
         latest_model = max(model_files, key=_parse_tai_episode)
@@ -464,39 +464,39 @@ class DiffWaveGPUService:
             checkpoint = _torch_load_checkpoint(latest_model, map_location=device)
             if isinstance(checkpoint, dict):
                 _load_policy_state(
-                    self.diffwave_tai_leg_upper,
+                    self.wavegrad_tai_leg_upper,
                     checkpoint,
-                    policy_keys=("diffwave_tai_leg_upper", "policy_LegUpper"),
-                    optimizer_keys=("optimizer_diffwave_tai_leg_upper", "optimizer_LegUpper"),
-                    critic_keys=("critic_diffwave_tai_leg_upper",),
-                    critic_optimizer_keys=("optimizer_critic_diffwave_tai_leg_upper",),
+                    policy_keys=("wavegrad_tai_leg_upper", "policy_LegUpper"),
+                    optimizer_keys=("optimizer_wavegrad_tai_leg_upper", "optimizer_LegUpper"),
+                    critic_keys=("critic_wavegrad_tai_leg_upper",),
+                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_leg_upper",),
                 )
                 _load_policy_state(
-                    self.diffwave_tai_leg_lower,
+                    self.wavegrad_tai_leg_lower,
                     checkpoint,
-                    policy_keys=("diffwave_tai_leg_lower", "policy_LegLower"),
-                    optimizer_keys=("optimizer_diffwave_tai_leg_lower", "optimizer_LegLower"),
-                    critic_keys=("critic_diffwave_tai_leg_lower",),
-                    critic_optimizer_keys=("optimizer_critic_diffwave_tai_leg_lower",),
+                    policy_keys=("wavegrad_tai_leg_lower", "policy_LegLower"),
+                    optimizer_keys=("optimizer_wavegrad_tai_leg_lower", "optimizer_LegLower"),
+                    critic_keys=("critic_wavegrad_tai_leg_lower",),
+                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_leg_lower",),
                 )
                 _load_policy_state(
-                    self.diffwave_tai_ankle,
+                    self.wavegrad_tai_ankle,
                     checkpoint,
-                    policy_keys=("diffwave_tai_ankle", "policy_Ankle"),
-                    optimizer_keys=("optimizer_diffwave_tai_ankle", "optimizer_Ankle"),
-                    critic_keys=("critic_diffwave_tai_ankle",),
-                    critic_optimizer_keys=("optimizer_critic_diffwave_tai_ankle",),
+                    policy_keys=("wavegrad_tai_ankle", "policy_Ankle"),
+                    optimizer_keys=("optimizer_wavegrad_tai_ankle", "optimizer_Ankle"),
+                    critic_keys=("critic_wavegrad_tai_ankle",),
+                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_ankle",),
                 )
-                self.diffwave_tai_leg_upper.load_replay_state(checkpoint.get("replay_diffwave_tai_leg_upper"))
-                self.diffwave_tai_leg_lower.load_replay_state(checkpoint.get("replay_diffwave_tai_leg_lower"))
-                self.diffwave_tai_ankle.load_replay_state(checkpoint.get("replay_diffwave_tai_ankle"))
+                self.wavegrad_tai_leg_upper.load_replay_state(checkpoint.get("replay_wavegrad_tai_leg_upper"))
+                self.wavegrad_tai_leg_lower.load_replay_state(checkpoint.get("replay_wavegrad_tai_leg_lower"))
+                self.wavegrad_tai_ankle.load_replay_state(checkpoint.get("replay_wavegrad_tai_ankle"))
                 tai_episode = int(checkpoint.get("episode", ep))
             else:
-                self.diffwave_tai_leg_upper.policy.load_state_dict(checkpoint, strict=False)
-                self.diffwave_tai_leg_lower.policy.load_state_dict(checkpoint, strict=False)
-                self.diffwave_tai_ankle.policy.load_state_dict(checkpoint, strict=False)
+                self.wavegrad_tai_leg_upper.policy.load_state_dict(checkpoint, strict=False)
+                self.wavegrad_tai_leg_lower.policy.load_state_dict(checkpoint, strict=False)
+                self.wavegrad_tai_ankle.policy.load_state_dict(checkpoint, strict=False)
                 tai_episode = ep
-            print("Loaded DiffWave tai model: %s; resume tai episode %d" % (latest_model, tai_episode), flush=True)
+            print("Loaded WaveGrad tai model: %s; resume tai episode %d" % (latest_model, tai_episode), flush=True)
             return max(int(default_episode), int(tai_episode))
         except Exception as exc:
             print("Failed to load tai model %s: %s" % (latest_model, exc), flush=True)
@@ -532,7 +532,7 @@ class DiffWaveGPUService:
 
     def choose_catch(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_catch is not None
+        assert self.wavegrad_catch is not None
 
         image = self._as_float_array(kwargs.get("image"), np.float32)
         robot_state = self._as_float_array(kwargs.get("robot_state"), np.float32)
@@ -551,7 +551,7 @@ class DiffWaveGPUService:
         if deterministic_eval:
             joint_seed = 0 if deterministic_seed is None else int(deterministic_seed)
 
-        joint_action, joint_value = self.diffwave_catch.choose_action(
+        joint_action, joint_value = self.wavegrad_catch.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             safety_features=safety_features,
@@ -567,7 +567,7 @@ class DiffWaveGPUService:
             joint_action = np.pad(joint_action, (0, 2 - joint_action.size), mode="constant")
         shoulder_action = float(joint_action[0])
         arm_action = float(joint_action[1])
-        catch_info = self._action_info(self.diffwave_catch)
+        catch_info = self._action_info(self.wavegrad_catch)
         return {
             "shoulder_action": shoulder_action,
             "shoulder_value": float(joint_value),
@@ -583,7 +583,7 @@ class DiffWaveGPUService:
 
     def store_catch(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_catch is not None
+        assert self.wavegrad_catch is not None
 
         actions = list(kwargs.get("actions", []))
         values = list(kwargs.get("values", []))
@@ -601,7 +601,7 @@ class DiffWaveGPUService:
             safety_features = self._as_float_array(safety_features, np.float32)
 
         joint_value = float(np.mean(np.asarray(values, dtype=np.float32)))
-        self.diffwave_catch.store_transition_catch(
+        self.wavegrad_catch.store_transition_catch(
             state=state,
             action=[float(actions[0]), float(actions[1])],
             reward=reward,
@@ -612,7 +612,7 @@ class DiffWaveGPUService:
             success_flag=success_flag,
             safety_penalty=safety_penalty,
         )
-        memory_size = len(self.diffwave_catch.actions)
+        memory_size = len(self.wavegrad_catch.actions)
         return {
             "catch_memory_size": memory_size,
             "shoulder_memory_size": memory_size,
@@ -621,16 +621,16 @@ class DiffWaveGPUService:
 
     def learn_catch(self) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_catch is not None
+        assert self.wavegrad_catch is not None
 
-        loss = self.diffwave_catch.learn()
-        return self._combined_loss_result([self.diffwave_catch], [loss], role_prefixes=("catch",))
+        loss = self.wavegrad_catch.learn()
+        return self._combined_loss_result([self.wavegrad_catch], [loss], role_prefixes=("catch",))
 
     def choose_tai(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_tai_leg_upper is not None
-        assert self.diffwave_tai_leg_lower is not None
-        assert self.diffwave_tai_ankle is not None
+        assert self.wavegrad_tai_leg_upper is not None
+        assert self.wavegrad_tai_leg_lower is not None
+        assert self.wavegrad_tai_ankle is not None
 
         image = self._as_float_array(kwargs.get("image"), np.float32)
         robot_state = self._as_float_array(kwargs.get("robot_state"), np.float32)
@@ -641,7 +641,7 @@ class DiffWaveGPUService:
         action_clip = float(kwargs.get("action_clip", 1.0))
         candidate_count = kwargs.get("candidate_count")
 
-        leg_upper_action, leg_upper_value = self.diffwave_tai_leg_upper.choose_action(
+        leg_upper_action, leg_upper_value = self.wavegrad_tai_leg_upper.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
@@ -650,7 +650,7 @@ class DiffWaveGPUService:
             action_clip=action_clip,
             candidate_count=candidate_count,
         )
-        leg_lower_action, leg_lower_value = self.diffwave_tai_leg_lower.choose_action(
+        leg_lower_action, leg_lower_value = self.wavegrad_tai_leg_lower.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
@@ -659,7 +659,7 @@ class DiffWaveGPUService:
             action_clip=action_clip,
             candidate_count=candidate_count,
         )
-        ankle_action, ankle_value = self.diffwave_tai_ankle.choose_action(
+        ankle_action, ankle_value = self.wavegrad_tai_ankle.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
@@ -668,9 +668,9 @@ class DiffWaveGPUService:
             action_clip=action_clip,
             candidate_count=candidate_count,
         )
-        upper_info = self._action_info(self.diffwave_tai_leg_upper)
-        lower_info = self._action_info(self.diffwave_tai_leg_lower)
-        ankle_info = self._action_info(self.diffwave_tai_ankle)
+        upper_info = self._action_info(self.wavegrad_tai_leg_upper)
+        lower_info = self._action_info(self.wavegrad_tai_leg_lower)
+        ankle_info = self._action_info(self.wavegrad_tai_ankle)
         return {
             "leg_upper_action": float(leg_upper_action),
             "leg_upper_value": float(leg_upper_value),
@@ -699,9 +699,9 @@ class DiffWaveGPUService:
 
     def store_tai(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_tai_leg_upper is not None
-        assert self.diffwave_tai_leg_lower is not None
-        assert self.diffwave_tai_ankle is not None
+        assert self.wavegrad_tai_leg_upper is not None
+        assert self.wavegrad_tai_leg_lower is not None
+        assert self.wavegrad_tai_ankle is not None
 
         actions = list(kwargs.get("actions", []))
         values = list(kwargs.get("values", []))
@@ -715,7 +715,7 @@ class DiffWaveGPUService:
         success_flag = bool(kwargs.get("success_flag", False))
         safety_penalty = float(kwargs.get("safety_penalty", 0.0))
 
-        agents = [self.diffwave_tai_leg_upper, self.diffwave_tai_leg_lower, self.diffwave_tai_ankle]
+        agents = [self.wavegrad_tai_leg_upper, self.wavegrad_tai_leg_lower, self.wavegrad_tai_ankle]
         for agent, action, value in zip(agents, actions, values):
             agent.store_transition_tai(
                 state=state,
@@ -728,18 +728,18 @@ class DiffWaveGPUService:
                 safety_penalty=safety_penalty,
             )
         return {
-            "leg_upper_memory_size": len(self.diffwave_tai_leg_upper.actions),
-            "leg_lower_memory_size": len(self.diffwave_tai_leg_lower.actions),
-            "ankle_memory_size": len(self.diffwave_tai_ankle.actions),
+            "leg_upper_memory_size": len(self.wavegrad_tai_leg_upper.actions),
+            "leg_lower_memory_size": len(self.wavegrad_tai_leg_lower.actions),
+            "ankle_memory_size": len(self.wavegrad_tai_ankle.actions),
         }
 
     def learn_tai(self) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_tai_leg_upper is not None
-        assert self.diffwave_tai_leg_lower is not None
-        assert self.diffwave_tai_ankle is not None
+        assert self.wavegrad_tai_leg_upper is not None
+        assert self.wavegrad_tai_leg_lower is not None
+        assert self.wavegrad_tai_ankle is not None
 
-        agents = [self.diffwave_tai_leg_upper, self.diffwave_tai_leg_lower, self.diffwave_tai_ankle]
+        agents = [self.wavegrad_tai_leg_upper, self.wavegrad_tai_leg_lower, self.wavegrad_tai_ankle]
         losses = [agent.learn() for agent in agents]
         return self._combined_loss_result(agents, losses, role_prefixes=("leg_upper", "leg_lower", "ankle"))
 
@@ -783,7 +783,7 @@ class DiffWaveGPUService:
 
     def save_catch_checkpoint(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_catch is not None
+        assert self.wavegrad_catch is not None
 
         episode = int(kwargs.get("episode", 0))
         episode_return = float(kwargs.get("episode_return", 0.0))
@@ -796,12 +796,12 @@ class DiffWaveGPUService:
             self.best_catch_test_success_rate = test_success_rate
 
         checkpoint = {
-            "diffwave_catch": self.diffwave_catch.policy.state_dict(),
-            "optimizer_diffwave_catch": self.diffwave_catch.optimizer.state_dict(),
-            "critic_diffwave_catch": self.diffwave_catch.critic.state_dict(),
-            "optimizer_critic_diffwave_catch": self.diffwave_catch.critic_optimizer.state_dict(),
-            "replay_diffwave_catch": self.diffwave_catch.export_replay_state(max_items=64),
-            "catch_action_dim": int(self.diffwave_catch.action_dim),
+            "wavegrad_catch": self.wavegrad_catch.policy.state_dict(),
+            "optimizer_wavegrad_catch": self.wavegrad_catch.optimizer.state_dict(),
+            "critic_wavegrad_catch": self.wavegrad_catch.critic.state_dict(),
+            "optimizer_critic_wavegrad_catch": self.wavegrad_catch.critic_optimizer.state_dict(),
+            "replay_wavegrad_catch": self.wavegrad_catch.export_replay_state(max_items=64),
+            "catch_action_dim": int(self.wavegrad_catch.action_dim),
             "episode": episode,
             "episode_return": episode_return,
             "catch_success": success_flag,
@@ -812,9 +812,9 @@ class DiffWaveGPUService:
             "best_test_success_rate": self.best_catch_test_success_rate,
         }
 
-        base_dir = path_list["model_path_catch_DiffWave"]
+        base_dir = path_list["model_path_catch_WaveGrad"]
         _ensure_dir(base_dir)
-        save_path = os.path.join(base_dir, "diffwave_model_%d.ckpt" % episode)
+        save_path = os.path.join(base_dir, "wavegrad_model_%d.ckpt" % episode)
         torch.save(checkpoint, save_path)
         ranked_path = self.model_ranking.add_and_manage(
             new_score=test_success_rate,
@@ -825,43 +825,43 @@ class DiffWaveGPUService:
         )
         best_path = None
         if is_new_best:
-            best_path = os.path.join(base_dir, "best_catch_DiffWave.pth")
+            best_path = os.path.join(base_dir, "best_catch_WaveGrad.pth")
             torch.save(checkpoint, best_path)
-            print("Saved best DiffWave catch checkpoint: %s" % best_path, flush=True)
-        print("Saved DiffWave catch checkpoint: %s" % save_path, flush=True)
+            print("Saved best WaveGrad catch checkpoint: %s" % best_path, flush=True)
+        print("Saved WaveGrad catch checkpoint: %s" % save_path, flush=True)
         return {"save_path": save_path, "ranked_path": ranked_path, "best_path": best_path}
 
     def save_tai_checkpoint(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
-        assert self.diffwave_tai_leg_upper is not None
-        assert self.diffwave_tai_leg_lower is not None
-        assert self.diffwave_tai_ankle is not None
+        assert self.wavegrad_tai_leg_upper is not None
+        assert self.wavegrad_tai_leg_lower is not None
+        assert self.wavegrad_tai_ankle is not None
 
         total_episode = int(kwargs.get("total_episode", 0))
         tai_episode = int(kwargs.get("tai_episode", kwargs.get("episode", 0)))
         checkpoint = {
             "episode": tai_episode,
-            "diffwave_tai_leg_upper": self.diffwave_tai_leg_upper.policy.state_dict(),
-            "optimizer_diffwave_tai_leg_upper": self.diffwave_tai_leg_upper.optimizer.state_dict(),
-            "critic_diffwave_tai_leg_upper": self.diffwave_tai_leg_upper.critic.state_dict(),
-            "optimizer_critic_diffwave_tai_leg_upper": self.diffwave_tai_leg_upper.critic_optimizer.state_dict(),
-            "replay_diffwave_tai_leg_upper": self.diffwave_tai_leg_upper.export_replay_state(max_items=64),
-            "diffwave_tai_leg_lower": self.diffwave_tai_leg_lower.policy.state_dict(),
-            "optimizer_diffwave_tai_leg_lower": self.diffwave_tai_leg_lower.optimizer.state_dict(),
-            "critic_diffwave_tai_leg_lower": self.diffwave_tai_leg_lower.critic.state_dict(),
-            "optimizer_critic_diffwave_tai_leg_lower": self.diffwave_tai_leg_lower.critic_optimizer.state_dict(),
-            "replay_diffwave_tai_leg_lower": self.diffwave_tai_leg_lower.export_replay_state(max_items=64),
-            "diffwave_tai_ankle": self.diffwave_tai_ankle.policy.state_dict(),
-            "optimizer_diffwave_tai_ankle": self.diffwave_tai_ankle.optimizer.state_dict(),
-            "critic_diffwave_tai_ankle": self.diffwave_tai_ankle.critic.state_dict(),
-            "optimizer_critic_diffwave_tai_ankle": self.diffwave_tai_ankle.critic_optimizer.state_dict(),
-            "replay_diffwave_tai_ankle": self.diffwave_tai_ankle.export_replay_state(max_items=64),
+            "wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.policy.state_dict(),
+            "optimizer_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.optimizer.state_dict(),
+            "critic_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.critic.state_dict(),
+            "optimizer_critic_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.critic_optimizer.state_dict(),
+            "replay_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.export_replay_state(max_items=64),
+            "wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.policy.state_dict(),
+            "optimizer_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.optimizer.state_dict(),
+            "critic_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.critic.state_dict(),
+            "optimizer_critic_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.critic_optimizer.state_dict(),
+            "replay_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.export_replay_state(max_items=64),
+            "wavegrad_tai_ankle": self.wavegrad_tai_ankle.policy.state_dict(),
+            "optimizer_wavegrad_tai_ankle": self.wavegrad_tai_ankle.optimizer.state_dict(),
+            "critic_wavegrad_tai_ankle": self.wavegrad_tai_ankle.critic.state_dict(),
+            "optimizer_critic_wavegrad_tai_ankle": self.wavegrad_tai_ankle.critic_optimizer.state_dict(),
+            "replay_wavegrad_tai_ankle": self.wavegrad_tai_ankle.export_replay_state(max_items=64),
         }
-        base_dir = path_list["model_path_tai_DiffWave"]
+        base_dir = path_list["model_path_tai_WaveGrad"]
         _ensure_dir(base_dir)
-        save_path = os.path.join(base_dir, "diffwave_model_tai_%d_%d.ckpt" % (total_episode, tai_episode))
+        save_path = os.path.join(base_dir, "wavegrad_model_tai_%d_%d.ckpt" % (total_episode, tai_episode))
         torch.save(checkpoint, save_path)
-        print("Saved DiffWave tai checkpoint: %s" % save_path, flush=True)
+        print("Saved WaveGrad tai checkpoint: %s" % save_path, flush=True)
         return {"save_path": save_path}
 
     def set_mode(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -870,9 +870,9 @@ class DiffWaveGPUService:
         mode = str(kwargs.get("mode", "train")).lower()
         agents: List[Any] = []
         if stage in ("catch", "all"):
-            agents.append(self.diffwave_catch)
+            agents.append(self.wavegrad_catch)
         if stage in ("tai", "all"):
-            agents.extend([self.diffwave_tai_leg_upper, self.diffwave_tai_leg_lower, self.diffwave_tai_ankle])
+            agents.extend([self.wavegrad_tai_leg_upper, self.wavegrad_tai_leg_lower, self.wavegrad_tai_ankle])
         for agent in agents:
             if agent is None:
                 continue
@@ -918,15 +918,15 @@ class DiffWaveGPUService:
         raise ValueError("unknown command: %s" % cmd)
 
     def serve_forever(self) -> None:
-        print("DiffWave GPU service starting on %s:%d" % (self.host, self.port), flush=True)
+        print("WaveGrad GPU service starting on %s:%d" % (self.host, self.port), flush=True)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
             server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_sock.bind((self.host, self.port))
             server_sock.listen(1)
-            print("DiffWave GPU service listening on %s:%d" % (self.host, self.port), flush=True)
+            print("WaveGrad GPU service listening on %s:%d" % (self.host, self.port), flush=True)
             while self.running:
                 conn, addr = server_sock.accept()
-                print("DiffWave GPU client connected: %s:%s" % addr, flush=True)
+                print("WaveGrad GPU client connected: %s:%s" % addr, flush=True)
                 with conn:
                     while self.running:
                         try:
@@ -948,11 +948,11 @@ class DiffWaveGPUService:
                                     "traceback": traceback.format_exc(),
                                 },
                             )
-                print("DiffWave GPU client disconnected.", flush=True)
+                print("WaveGrad GPU client disconnected.", flush=True)
 
 
 def _once_smoke(host: str, port: int) -> None:
-    service = DiffWaveGPUService(host=host, port=port)
+    service = WaveGradGPUService(host=host, port=port)
     info = service.init_agents(max_steps_per_episode=3)
     image = np.zeros((128, 128), dtype=np.float32)
     robot_state = np.zeros(20, dtype=np.float32)
@@ -972,7 +972,7 @@ def _once_smoke(host: str, port: int) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="DiffWave GPU algorithm service")
+    parser = argparse.ArgumentParser(description="WaveGrad GPU algorithm service")
     parser.add_argument("--host", type=str, default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--once-smoke", action="store_true")
@@ -984,7 +984,7 @@ def main() -> None:
     if args.once_smoke:
         _once_smoke(args.host, args.port)
         return
-    DiffWaveGPUService(host=args.host, port=args.port).serve_forever()
+    WaveGradGPUService(host=args.host, port=args.port).serve_forever()
 
 
 if __name__ == "__main__":

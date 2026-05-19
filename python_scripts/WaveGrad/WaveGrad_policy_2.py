@@ -1,7 +1,7 @@
-from python_scripts.DiffWave.DiffWave_policy import DiffWaveAgent
+from python_scripts.WaveGrad.WaveGrad_policy import WaveGradAgent
 
 
-class DiffWaveTaiAgent(DiffWaveAgent):
+class WaveGradTaiAgent(WaveGradAgent):
     def __init__(self, node_num, env_information=None, trajectory_len=20):
         super().__init__(
             node_num=node_num,

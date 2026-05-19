@@ -208,7 +208,7 @@ class DiffusionScheduler(nn.Module):
         return mean + nonzero_mask * torch.sqrt(beta) * noise
 
 
-class DiffWaveResidualBlock(nn.Module):
+class WaveGradResidualBlock(nn.Module):
     def __init__(self, res_channels, cond_dim, embed_dim, dilation):
         super().__init__()
         self.dilated_conv = nn.Conv1d(
@@ -233,7 +233,7 @@ class DiffWaveResidualBlock(nn.Module):
         return (x + residual) * 0.70710678, skip
 
 
-class DiffWaveModel(nn.Module):
+class WaveGradModel(nn.Module):
     def __init__(
         self,
         res_channels=64,
@@ -254,7 +254,7 @@ class DiffWaveModel(nn.Module):
         for i in range(num_layers):
             dilation = 2 ** (i % dilation_cycle)
             self.residual_layers.append(
-                DiffWaveResidualBlock(
+                WaveGradResidualBlock(
                     res_channels=res_channels,
                     cond_dim=cond_dim,
                     embed_dim=diffusion_embed_dim,
@@ -282,7 +282,7 @@ class DiffWaveModel(nn.Module):
         return x
 
 
-class DiffWavePolicy(nn.Module):
+class WaveGradPolicy(nn.Module):
     def __init__(
         self,
         node_num,
@@ -299,7 +299,7 @@ class DiffWavePolicy(nn.Module):
         self.action_dim = max(1, int(action_dim))
         self.encoder = FeatureEncoder(node_num, safety_dim=safety_dim)
         self.cond_proj = nn.Linear(cond_dim, model_dim)
-        self.diffusion = DiffWaveModel(
+        self.diffusion = WaveGradModel(
             res_channels=res_channels,
             cond_dim=model_dim,
             diffusion_embed_dim=model_dim,
@@ -406,7 +406,7 @@ class ActionValueCritic(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-class DiffWaveAgent:
+class WaveGradAgent:
     def __init__(
         self,
         node_num,
@@ -457,7 +457,7 @@ class DiffWaveAgent:
         self.q_guidance_min_critic_updates = max(0, int(q_guidance_min_critic_updates))
         self.q_guidance_min_replay = max(0, int(q_guidance_min_replay))
 
-        self.policy = DiffWavePolicy(
+        self.policy = WaveGradPolicy(
             node_num=self.node_num,
             diffusion_steps=24,
             safety_dim=self.safety_dim,
@@ -1058,4 +1058,4 @@ class DiffWaveAgent:
         self.safety_penalties = []
 
 
-DiffWaveCatchAgent = DiffWaveAgent
+WaveGradCatchAgent = WaveGradAgent

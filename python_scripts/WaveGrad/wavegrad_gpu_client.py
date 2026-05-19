@@ -1,4 +1,4 @@
-"""Python 3.7 compatible client for the DiffWave GPU service."""
+"""Python 3.7 compatible client for the WaveGrad GPU service."""
 
 from __future__ import print_function
 
@@ -15,8 +15,8 @@ import numpy as np
 
 PICKLE_PROTOCOL = 4
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8876
-DEFAULT_MISSION_PYTHON = r"D:\anaconda\envs\mission\python.exe"
+DEFAULT_PORT = 8877
+DEFAULT_MISSION_PYTHON = os.environ.get("WAVEGRAD_MISSION_PYTHON")
 
 
 def _project_root():
@@ -46,7 +46,7 @@ def send_packet(sock_obj, obj):
     sock_obj.sendall(header + payload)
 
 
-class DiffWaveGPUClient(object):
+class WaveGradGPUClient(object):
     def __init__(
         self,
         host=DEFAULT_HOST,
@@ -60,7 +60,7 @@ class DiffWaveGPUClient(object):
     ):
         self.host = str(host)
         self.port = int(port)
-        self.mission_python = mission_python or os.environ.get("DIFFWAVE_MISSION_PYTHON", DEFAULT_MISSION_PYTHON)
+        self.mission_python = mission_python or os.environ.get("WAVEGRAD_MISSION_PYTHON") or DEFAULT_MISSION_PYTHON
         self.project_root = project_root or _project_root()
         self.timeout_s = float(timeout_s)
         self.retry_attempts = int(retry_attempts)
@@ -83,13 +83,19 @@ class DiffWaveGPUClient(object):
 
         try:
             self._connect_once(timeout_s=1.0)
-            print("Using existing DiffWave GPU service at %s:%d" % (self.host, self.port))
+            print("Using existing WaveGrad GPU service at %s:%d" % (self.host, self.port))
             return
         except Exception:
             self.sock = None
 
         if not self.auto_start:
             return
+
+        if not self.mission_python:
+            raise RuntimeError(
+                "WaveGrad mission Python is not configured. "
+                "Set WAVEGRAD_MISSION_PYTHON before using TRAIN_ALGO=wavegrad."
+            )
 
         if not os.path.isfile(self.mission_python):
             raise RuntimeError("mission Python not found: %s" % self.mission_python)
@@ -105,13 +111,13 @@ class DiffWaveGPUClient(object):
             self.mission_python,
             "-u",
             "-m",
-            "python_scripts.DiffWave.diffwave_gpu_service",
+            "python_scripts.WaveGrad.wavegrad_gpu_service",
             "--host",
             self.host,
             "--port",
             str(self.port),
         ]
-        print("Starting DiffWave GPU service with mission python")
+        print("Starting WaveGrad GPU service with mission python")
         print("Mission Python: %s" % self.mission_python)
         print("GPU service endpoint: %s:%d" % (self.host, self.port))
         self.process = subprocess.Popen(command, cwd=self.project_root, env=env)
@@ -128,7 +134,7 @@ class DiffWaveGPUClient(object):
         for _ in range(self.retry_attempts):
             if self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(
-                    "DiffWave GPU service exited early with code %s" % self.process.returncode
+                    "WaveGrad GPU service exited early with code %s" % self.process.returncode
                 )
             try:
                 self._connect_once(timeout_s=self.timeout_s)
@@ -138,7 +144,7 @@ class DiffWaveGPUClient(object):
                 time.sleep(self.retry_sleep_s)
 
         raise RuntimeError(
-            "failed to connect to DiffWave GPU service at %s:%d after %d attempts: %s"
+            "failed to connect to WaveGrad GPU service at %s:%d after %d attempts: %s"
             % (self.host, self.port, self.retry_attempts, last_error)
         )
 
@@ -148,7 +154,7 @@ class DiffWaveGPUClient(object):
         reply = recv_packet(self.sock)
         if not reply.get("ok", False):
             raise RuntimeError(
-                "DiffWave GPU service error for cmd=%s\n%s\n%s"
+                "WaveGrad GPU service error for cmd=%s\n%s\n%s"
                 % (cmd, reply.get("error", "unknown error"), reply.get("traceback", ""))
             )
         return reply.get("result")
@@ -369,7 +375,7 @@ class DiffWaveGPUClient(object):
 
 
 def main():
-    client = DiffWaveGPUClient(auto_start=False)
+    client = WaveGradGPUClient(auto_start=False)
     print(client.runtime_info())
 
 

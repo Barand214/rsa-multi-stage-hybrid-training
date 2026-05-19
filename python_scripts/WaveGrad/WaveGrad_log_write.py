@@ -117,7 +117,7 @@ class Log_write:
             file.flush()
             os.fsync(file.fileno())
         os.replace(tmp_file_path, file_path)
-        print(f"DiffWave log saved: {file_path}")
+        print(f"WaveGrad log saved: {file_path}")
 
     def _filter_metrics(self, data_to_save, stage):
         common_keys = [

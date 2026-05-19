@@ -1,6 +1,6 @@
 import math
 
-from python_scripts.DiffWave.DiffWave_log_write import Log_write
+from python_scripts.WaveGrad.WaveGrad_log_write import Log_write
 from python_scripts.Project_config import gps_goal1, path_list
 
 
@@ -34,11 +34,11 @@ def _tai_train_schedule(episode):
     }
 
 
-def DiffWave_tai_episoid(
+def WaveGrad_tai_episoid(
     gpu=None,
-    diffwave_tai_leg_upper=None,
-    diffwave_tai_leg_lower=None,
-    diffwave_tai_ankle=None,
+    wavegrad_tai_leg_upper=None,
+    wavegrad_tai_leg_lower=None,
+    wavegrad_tai_ankle=None,
     existing_env=None,
     total_episode=0,
     episode=0,
@@ -50,15 +50,15 @@ def DiffWave_tai_episoid(
     trajectory_len = 20
     owns_gpu = gpu is None
     if gpu is None:
-        from python_scripts.DiffWave.diffwave_gpu_client import DiffWaveGPUClient
+        from python_scripts.WaveGrad.wavegrad_gpu_client import WaveGradGPUClient
 
-        gpu = DiffWaveGPUClient()
+        gpu = WaveGradGPUClient()
         gpu.initialize(max_steps_per_episode=trajectory_len)
     if log_writer_tai is None:
         log_writer_tai = Log_write()
 
     env = existing_env if existing_env is not None else Environment()
-    print("Starting DiffWave tai stage.")
+    print("Starting WaveGrad tai stage.")
     env.darwin.tai_leg_L1()
     env.darwin.tai_leg_L2()
 
@@ -139,7 +139,7 @@ def DiffWave_tai_episoid(
 
         if episode % 400 == 0 and done == 1:
             save_result = gpu.save_tai_checkpoint(total_episode=total_episode, tai_episode=episode)
-            print(f"Saving DiffWave tai checkpoint: {save_result}")
+            print(f"Saving WaveGrad tai checkpoint: {save_result}")
 
         if episode > 0 and done == 1:
             learn_info = gpu.learn_tai()
@@ -160,7 +160,7 @@ def DiffWave_tai_episoid(
             log_writer_tai.add(goal=goal)
 
         if done == 1 or steps > trajectory_len:
-            print("DiffWave tai stage finished; resetting robot.")
+            print("WaveGrad tai stage finished; resetting robot.")
             env.darwin._set_left_leg_initpose()
             env.darwin.robot_reset()
             for _ in range(40):

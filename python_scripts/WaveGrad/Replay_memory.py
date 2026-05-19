@@ -1,4 +1,4 @@
-"""Replay memory helpers for DiffWave reward-weighted diffusion training."""
+"""Replay memory helpers for WaveGrad reward-weighted diffusion training."""
 
 import collections
 import random

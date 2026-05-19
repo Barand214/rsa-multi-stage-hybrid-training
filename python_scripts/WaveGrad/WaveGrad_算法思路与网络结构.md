@@ -1,11 +1,13 @@
-# DiffWave 算法思路与网络结构说明
+# WaveGrad 算法思路与网络结构说明
+
+> 当前 WaveGrad 目录已独立出入口、配置、日志和 checkpoint，但策略数学暂时沿用从 DiffWave 复制来的扩散实现；真正的 WaveGrad denoiser/score 模型将在后续步骤替换。
 
 ## 1. 总体思路
 
-当前 DiffWave 训练链路的目标是用扩散策略替代原 PPO 策略，在 Webots 中完成机器人抓取和抬腿两阶段训练。整体设计不是传统 PPO 的 `log_prob + ratio + clip`，而是：
+当前 WaveGrad 训练链路的目标是用扩散策略替代原 PPO 策略，在 Webots 中完成机器人抓取和抬腿两阶段训练。整体设计不是传统 PPO 的 `log_prob + ratio + clip`，而是：
 
 1. Webots 负责仿真、传感器读取、动作执行、奖励计算和 episode 流程。
-2. Python 3.11 的 mission 环境作为 DiffWave GPU 服务，负责神经网络推理、经验缓存、学习和 checkpoint。
+2. Python 3.11 的 mission 环境作为 WaveGrad GPU 服务，负责神经网络推理、经验缓存、学习和 checkpoint。
 3. 每个 step 都根据当前图像、机器人状态、图结构状态和安全特征重新采样动作。
 4. 训练时使用奖励加权 diffusion loss，同时加入 value head 和 action-value critic 作为辅助学习信号。
 5. 成功轨迹和高回报轨迹会长期保留在 replay 中，避免稀有成功样本被单个 episode 结束后的 `clear_memory()` 遗忘。
@@ -14,24 +16,24 @@
 
 ```text
 Webots Train_main.py
-    -> DiffWave_episoid_1.py
-        -> DiffWaveGPUClient
-            -> mission python 启动 diffwave_gpu_service.py
-                -> DiffWaveAgent / DiffWaveTaiAgent
-                    -> DiffWavePolicy + ActionValueCritic
+    -> WaveGrad_episoid_1.py
+        -> WaveGradGPUClient
+            -> mission python 启动 wavegrad_gpu_service.py
+                -> WaveGradAgent / WaveGradTaiAgent
+                    -> WaveGradPolicy + ActionValueCritic
 ```
 
 ## 2. 双 Python + GPU 运行方式
 
-Webots 控制器继续使用 Webots 自带/兼容的 Python 3.7 环境，因为 Webots 的 `controller` API 依赖该运行时。DiffWave 网络训练放在 `D:\anaconda\envs\mission\python.exe` 中运行，用于调用 Python 3.11 和 CUDA 版本 PyTorch。
+Webots 控制器继续使用 Webots 自带/兼容的 Python 3.7 环境，因为 Webots 的 `controller` API 依赖该运行时。WaveGrad 网络训练放在 `%WAVEGRAD_MISSION_PYTHON%` 指向的 mission Python 中运行，用于调用 Python 3.11 和 CUDA 版本 PyTorch。
 
-Webots 侧通过 `python_scripts/DiffWave/diffwave_gpu_client.py` 自动启动 GPU 服务：
+Webots 侧通过 `python_scripts/WaveGrad/wavegrad_gpu_client.py` 自动启动 GPU 服务：
 
 ```text
-D:\anaconda\envs\mission\python.exe -m python_scripts.DiffWave.diffwave_gpu_service
+%WAVEGRAD_MISSION_PYTHON% -m python_scripts.WaveGrad.wavegrad_gpu_service
 ```
 
-两边通过 socket + pickle protocol 4 通信，默认端口为 `127.0.0.1:8876`。Webots 是主控流程，GPU 服务只作为算法服务被调用。
+两边通过 socket + pickle protocol 4 通信，默认端口为 `127.0.0.1:8877`。Webots 是主控流程，GPU 服务只作为算法服务被调用。
 
 主要 RPC 接口：
 
@@ -53,7 +55,7 @@ save_checkpoint   保存 policy、optimizer、critic、replay 状态
 1. Webots 读取当前 obs_img
 2. Webots 读取 robot_state
 3. Webots 构造 safety_features
-4. GPU 服务调用 DiffWaveAgent.choose_action()
+4. GPU 服务调用 WaveGradAgent.choose_action()
 5. Webots 执行动作并计算 reward / done / success_flag
 6. Webots 读取 next_obs_img 和 next_state
 7. GPU 服务调用 store_transition_catch()
@@ -70,7 +72,7 @@ leg_upper, leg_lower, ankle
 
 ## 4. 网络结构
 
-主要网络定义在 `python_scripts/DiffWave/DiffWave_policy.py`。
+主要网络定义在 `python_scripts/WaveGrad/WaveGrad_policy.py`。
 
 ### 4.1 FeatureEncoder
 
@@ -133,30 +135,30 @@ safety_features -> FC -> 200
 cond_features: [batch, 200]
 ```
 
-### 4.2 DiffWavePolicy
+### 4.2 WaveGradPolicy
 
-`DiffWavePolicy` 是扩散策略网络，包含：
+`WaveGradPolicy` 是扩散策略网络，包含：
 
 ```text
 FeatureEncoder
 cond_proj: 200 -> 128
-DiffWaveModel
+WaveGradModel
 DiffusionScheduler
 value_head: 200 -> 1
 ```
 
 其中 `value_head` 不是 PPO critic，不参与 PPO ratio/clip，只作为回报估计辅助 diffusion 训练。
 
-### 4.3 DiffWaveModel
+### 4.3 WaveGradModel
 
-`DiffWaveModel` 是动作扩散模型。它接收噪声动作 `x_t`、扩散步 `t` 和条件特征 `cond`，预测噪声 `pred_noise`。
+`WaveGradModel` 是动作扩散模型。它接收噪声动作 `x_t`、扩散步 `t` 和条件特征 `cond`，预测噪声 `pred_noise`。
 
 结构：
 
 ```text
 input_projection: Conv1d(1 -> residual channels)
 diffusion embedding: sinusoidal embedding + MLP
-12 个 DiffWaveResidualBlock
+12 个 WaveGradResidualBlock
 skip connection 聚合
 output_projection: Conv1d(res_channels -> 1)
 ```
@@ -189,7 +191,7 @@ output = Q(s, a)
 
 ## 5. 动作生成机制
 
-`DiffWaveAgent.choose_action()` 的逻辑：
+`WaveGradAgent.choose_action()` 的逻辑：
 
 ```text
 1. 编码当前 image / robot_state / graph_state / safety_features
@@ -276,7 +278,7 @@ q_guidance_loss = -mean(Q(cond, sampled_action))
 
 ## 7. Replay 设计
 
-当前 DiffWave 有三类经验：
+当前 WaveGrad 有三类经验：
 
 ```text
 current episode memory 当前 episode 临时缓存
@@ -318,9 +320,9 @@ elite_replay           高回报 episode 的长期缓存
 抓取阶段 checkpoint 保存：
 
 ```text
-diffwave_catch joint-action policy / optimizer
-diffwave_catch joint-action critic / critic optimizer
-diffwave_catch joint-action replay state
+wavegrad_catch joint-action policy / optimizer
+wavegrad_catch joint-action critic / critic optimizer
+wavegrad_catch joint-action replay state
 catch_action_dim = 2
 episode 信息
 测试成功率信息
@@ -382,7 +384,7 @@ return_all 是否整体上升
 
 ## 10. 与 PPO 的区别
 
-当前 DiffWave 不使用：
+当前 WaveGrad 不使用：
 
 ```text
 log_prob
@@ -392,7 +394,7 @@ GAE
 entropy_coef
 ```
 
-PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advantage 动作概率；当前 DiffWave 的策略更新是：
+PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advantage 动作概率；当前 WaveGrad 的策略更新是：
 
 ```text
 1. 奖励加权 imitation：高回报动作 diffusion loss 权重大。
@@ -400,7 +402,7 @@ PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advanta
 3. success/elite replay：让成功动作长期反复参与训练。
 ```
 
-因此这套 DiffWave 更像是：
+因此这套 WaveGrad 更像是：
 
 ```text
 奖励加权扩散策略
@@ -434,4 +436,4 @@ return_all 的高分 episode 变多
 rolling_success_rate_100 有上升趋势
 ```
 
-如果长时间没有成功样本，DiffWave 会缺少可模仿的高质量动作，这时需要优先调整奖励、探索噪声、动作安全过滤或初始姿态，而不是继续堆网络层数。
+如果长时间没有成功样本，WaveGrad 会缺少可模仿的高质量动作，这时需要优先调整奖励、探索噪声、动作安全过滤或初始姿态，而不是继续堆网络层数。
