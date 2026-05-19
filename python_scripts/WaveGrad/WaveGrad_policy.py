@@ -173,113 +173,114 @@ class SinusoidalEmbedding(nn.Module):
         return emb
 
 
-class DiffusionScheduler(nn.Module):
-    def __init__(self, num_steps, beta_start=1e-4, beta_end=0.02):
+class WaveGradNoiseSchedule(nn.Module):
+    # 用连续 sigma 代替离散扩散步，训练时随机采样噪声等级，采样时按高到低逐级去噪。
+    def __init__(self, num_steps, sigma_min=0.01, sigma_max=1.0):
         super().__init__()
-        betas = torch.linspace(beta_start, beta_end, num_steps, dtype=torch.float32)
-        alphas = 1.0 - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-        self.register_buffer("betas", betas)
-        self.register_buffer("alphas", alphas)
-        self.register_buffer("alphas_cumprod", alphas_cumprod)
-        self.register_buffer("sqrt_alphas_cumprod", torch.sqrt(alphas_cumprod))
-        self.register_buffer("sqrt_one_minus_alphas_cumprod", torch.sqrt(1.0 - alphas_cumprod))
+        self.sigma_min = float(sigma_min)
+        self.sigma_max = float(sigma_max)
+        sigmas = torch.exp(
+            torch.linspace(
+                math.log(self.sigma_max),
+                math.log(self.sigma_min),
+                int(num_steps),
+                dtype=torch.float32,
+            )
+        )
+        self.register_buffer("sigmas", sigmas)
 
     @property
     def num_steps(self):
-        return int(self.betas.shape[0])
+        return int(self.sigmas.shape[0])
 
-    def q_sample(self, x0, t, noise):
-        t = t.long()
-        sqrt_alpha_bar = self.sqrt_alphas_cumprod[t].view(-1, 1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
-        return sqrt_alpha_bar * x0 + sqrt_one_minus * noise
+    def sample(self, batch_size, target_device):
+        # log-uniform 采样让模型同时看到高噪声探索和低噪声精修两类场景。
+        log_min = math.log(self.sigma_min)
+        log_max = math.log(self.sigma_max)
+        uniform = torch.rand(int(batch_size), device=target_device)
+        sigma = torch.exp(log_min + uniform * (log_max - log_min))
+        return sigma.view(-1, 1, 1)
 
-    def p_sample(self, x_t, t, pred_noise):
-        t = t.long()
-        beta = self.betas[t].view(-1, 1, 1)
-        alpha = self.alphas[t].view(-1, 1, 1)
-        sqrt_one_minus = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1)
-
-        mean = (1.0 / torch.sqrt(alpha)) * (x_t - (beta / sqrt_one_minus) * pred_noise)
-        noise = torch.randn_like(x_t)
-        nonzero_mask = (t != 0).float().view(-1, 1, 1)
-        return mean + nonzero_mask * torch.sqrt(beta) * noise
+    def sampling_levels(self, steps=None):
+        if steps is None or int(steps) >= self.num_steps:
+            return self.sigmas
+        indices = torch.linspace(0, self.num_steps - 1, int(steps), device=self.sigmas.device)
+        return self.sigmas[indices.round().long()]
 
 
 class WaveGradResidualBlock(nn.Module):
-    def __init__(self, res_channels, cond_dim, embed_dim, dilation):
+    # 用 cond 和噪声等级生成 FiLM 调制参数，在低维动作空间里做轻量条件去噪。
+    def __init__(self, hidden_dim, cond_dim, noise_dim):
         super().__init__()
-        self.dilated_conv = nn.Conv1d(
-            res_channels,
-            2 * res_channels,
-            kernel_size=3,
-            dilation=dilation,
-            padding=dilation,
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.cond_projection = nn.Linear(cond_dim, 2 * hidden_dim)
+        self.noise_projection = nn.Linear(noise_dim, 2 * hidden_dim)
+        self.net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
         )
-        self.diffusion_projection = nn.Linear(embed_dim, res_channels)
-        self.cond_projection = nn.Linear(cond_dim, res_channels)
-        self.output_projection = nn.Conv1d(res_channels, 2 * res_channels, kernel_size=1)
 
-    def forward(self, x, diffusion_emb, cond):
-        y = x + self.diffusion_projection(diffusion_emb).unsqueeze(-1)
-        y = y + self.cond_projection(cond).unsqueeze(-1)
-        y = self.dilated_conv(y)
-        gate, filt = y.chunk(2, dim=1)
-        y = torch.tanh(filt) * torch.sigmoid(gate)
-        y = self.output_projection(y)
-        residual, skip = y.chunk(2, dim=1)
-        return (x + residual) * 0.70710678, skip
+    def forward(self, x, cond, noise_emb):
+        scale_shift = self.cond_projection(cond) + self.noise_projection(noise_emb)
+        scale, shift = scale_shift.chunk(2, dim=-1)
+        y = self.norm(x)
+        y = y * (1.0 + torch.tanh(scale)) + shift
+        return x + self.net(y) * 0.70710678
 
 
 class WaveGradModel(nn.Module):
+    # 当前动作维度很低，用残差 MLP 比音频版大卷积结构更贴合机器人动作输出。
     def __init__(
         self,
-        res_channels=64,
+        action_dim,
+        hidden_dim=128,
         cond_dim=128,
-        diffusion_embed_dim=128,
-        num_layers=12,
-        dilation_cycle=4,
+        noise_embed_dim=128,
+        num_layers=5,
     ):
         super().__init__()
-        self.input_projection = nn.Conv1d(1, res_channels, kernel_size=1)
-        self.diffusion_embedding = SinusoidalEmbedding(diffusion_embed_dim)
-        self.diffusion_mlp = nn.Sequential(
-            nn.Linear(diffusion_embed_dim, diffusion_embed_dim),
+        self.action_dim = max(1, int(action_dim))
+        self.input_projection = nn.Linear(self.action_dim, hidden_dim)
+        self.noise_embedding = SinusoidalEmbedding(noise_embed_dim)
+        self.noise_mlp = nn.Sequential(
+            nn.Linear(noise_embed_dim, noise_embed_dim),
             nn.SiLU(),
-            nn.Linear(diffusion_embed_dim, diffusion_embed_dim),
+            nn.Linear(noise_embed_dim, noise_embed_dim),
         )
-        self.residual_layers = nn.ModuleList()
-        for i in range(num_layers):
-            dilation = 2 ** (i % dilation_cycle)
-            self.residual_layers.append(
+        self.residual_layers = nn.ModuleList(
+            [
                 WaveGradResidualBlock(
-                    res_channels=res_channels,
+                    hidden_dim=hidden_dim,
                     cond_dim=cond_dim,
-                    embed_dim=diffusion_embed_dim,
-                    dilation=dilation,
+                    noise_dim=noise_embed_dim,
                 )
-            )
-        self.skip_projection = nn.Conv1d(res_channels, res_channels, kernel_size=1)
-        self.output_projection = nn.Conv1d(res_channels, 1, kernel_size=1)
+                for _ in range(int(num_layers))
+            ]
+        )
+        self.output_projection = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, self.action_dim),
+        )
 
-    def forward(self, x, diffusion_step, cond):
-        x = self.input_projection(x)
-        x = torch.relu(x)
-        diffusion_emb = self.diffusion_embedding(diffusion_step)
-        diffusion_emb = self.diffusion_mlp(diffusion_emb)
+    def forward(self, x, sigma, cond):
+        if x.dim() == 3:
+            x = x.squeeze(1)
+        x = x.view(x.shape[0], -1)
+        if x.shape[1] < self.action_dim:
+            x = F.pad(x, (0, self.action_dim - x.shape[1]))
+        elif x.shape[1] > self.action_dim:
+            x = x[:, : self.action_dim]
 
-        skip_sum = None
+        sigma = sigma.view(sigma.shape[0], -1)[:, 0].clamp(min=1e-4)
+        noise_level = torch.log(sigma)
+        noise_emb = self.noise_mlp(self.noise_embedding(noise_level))
+
+        h = self.input_projection(x)
         for layer in self.residual_layers:
-            x, skip = layer(x, diffusion_emb, cond)
-            skip_sum = skip if skip_sum is None else skip_sum + skip
-
-        skip_sum = skip_sum / math.sqrt(len(self.residual_layers))
-        x = self.skip_projection(skip_sum)
-        x = torch.relu(x)
-        x = self.output_projection(x)
-        return x
+            h = layer(h, cond, noise_emb)
+        return self.output_projection(h).view(-1, 1, self.action_dim)
 
 
 class WaveGradPolicy(nn.Module):
@@ -288,8 +289,8 @@ class WaveGradPolicy(nn.Module):
         node_num,
         cond_dim=200,
         model_dim=128,
-        res_channels=64,
-        num_layers=12,
+        res_channels=128,
+        num_layers=5,
         dilation_cycle=4,
         diffusion_steps=24,
         safety_dim=14,
@@ -300,13 +301,13 @@ class WaveGradPolicy(nn.Module):
         self.encoder = FeatureEncoder(node_num, safety_dim=safety_dim)
         self.cond_proj = nn.Linear(cond_dim, model_dim)
         self.diffusion = WaveGradModel(
-            res_channels=res_channels,
+            action_dim=self.action_dim,
+            hidden_dim=res_channels,
             cond_dim=model_dim,
-            diffusion_embed_dim=model_dim,
+            noise_embed_dim=model_dim,
             num_layers=num_layers,
-            dilation_cycle=dilation_cycle,
         )
-        self.scheduler = DiffusionScheduler(diffusion_steps)
+        self.scheduler = WaveGradNoiseSchedule(diffusion_steps)
         self.value_head = nn.Linear(cond_dim, 1)
 
     def encode(self, x, state, x_graph, safety_features=None):
@@ -324,15 +325,25 @@ class WaveGradPolicy(nn.Module):
         if cond_features.dim() == 1:
             cond_features = cond_features.unsqueeze(0)
         cond = self.cond_proj(cond_features)
+        action_seq = self._format_action_tensor(action_seq, cond.shape[0], cond.device)
         if weights is None:
             weights = torch.ones_like(action_seq)
+        else:
+            weights = torch.as_tensor(weights, dtype=torch.float32, device=action_seq.device)
+            weights = weights.view(action_seq.shape[0], 1, -1)
+            if weights.shape[-1] == 1:
+                weights = weights.expand_as(action_seq)
+            elif weights.shape[-1] != self.action_dim:
+                weights = weights[:, :, :1].expand_as(action_seq)
 
-        t = torch.randint(0, self.scheduler.num_steps, (action_seq.shape[0],), device=action_seq.device)
+        # 训练目标是给真实执行动作加连续强度噪声，再让模型预测这部分噪声。
+        sigma = self.scheduler.sample(action_seq.shape[0], action_seq.device)
         noise = torch.randn_like(action_seq)
-        x_t = self.scheduler.q_sample(action_seq, t, noise)
-        pred_noise = self.diffusion(x_t, t, cond)
+        noisy_action = action_seq + sigma * noise
+        pred_noise = self.diffusion(noisy_action, sigma, cond)
         loss = (pred_noise - noise) ** 2
-        return (loss * weights).mean()
+        sigma_weight = (1.0 / (sigma + 0.05)).clamp(0.5, 5.0)
+        return (loss * weights * sigma_weight).mean()
 
     @torch.no_grad()
     def sample_actions(self, cond_features, action_count=None, deterministic_seed=None):
@@ -352,11 +363,7 @@ class WaveGradPolicy(nn.Module):
                 torch.cuda.manual_seed_all(seed)
 
         try:
-            x = torch.randn(batch, 1, action_count, device=cond.device)
-            for t in reversed(range(self.scheduler.num_steps)):
-                t_batch = torch.full((batch,), t, device=cond.device, dtype=torch.long)
-                pred_noise = self.diffusion(x, t_batch, cond)
-                x = self.scheduler.p_sample(x, t_batch, pred_noise)
+            x = self._sample_from_noise(cond, action_count, steps=self.scheduler.num_steps, detach_noise=True)
             return torch.tanh(x).squeeze(1)
         finally:
             if restore_rng:
@@ -368,17 +375,43 @@ class WaveGradPolicy(nn.Module):
         if cond_features.dim() == 1:
             cond_features = cond_features.unsqueeze(0)
         cond = self.cond_proj(cond_features)
-        batch = cond.shape[0]
         action_count = self.action_dim if action_count is None else max(1, int(action_count))
-        x = torch.randn(batch, 1, action_count, device=cond.device)
-
-        guidance_steps = max(1, min(int(guidance_steps), self.scheduler.num_steps))
-        step_ids = np.linspace(self.scheduler.num_steps - 1, 0, guidance_steps, dtype=np.int64).tolist()
-        for t in step_ids:
-            t_batch = torch.full((batch,), int(t), device=cond.device, dtype=torch.long)
-            pred_noise = self.diffusion(x, t_batch, cond)
-            x = self.scheduler.p_sample(x, t_batch, pred_noise)
+        x = self._sample_from_noise(cond, action_count, steps=guidance_steps, detach_noise=False)
         return torch.tanh(x).squeeze(1)
+
+    def _format_action_tensor(self, actions, batch_size, target_device):
+        actions = torch.as_tensor(actions, dtype=torch.float32, device=target_device)
+        actions = actions.view(int(batch_size), -1)
+        if actions.shape[1] < self.action_dim:
+            actions = F.pad(actions, (0, self.action_dim - actions.shape[1]))
+        elif actions.shape[1] > self.action_dim:
+            actions = actions[:, : self.action_dim]
+        return actions.view(int(batch_size), 1, self.action_dim)
+
+    def _sample_from_noise(self, cond, action_count, steps=None, detach_noise=True):
+        batch = cond.shape[0]
+        action_count = max(1, int(action_count))
+        levels = self.scheduler.sampling_levels(steps=steps).to(cond.device)
+        x = torch.randn(batch, 1, self.action_dim, device=cond.device) * levels[0].view(1, 1, 1)
+        # 从高噪声动作开始，逐级估计 clean_action，并过渡到下一个更低 sigma。
+        for idx, sigma_value in enumerate(levels):
+            sigma = torch.full((batch, 1, 1), float(sigma_value.item()), device=cond.device)
+            pred_noise = self.diffusion(x, sigma, cond)
+            clean_action = x - sigma * pred_noise
+            if idx + 1 < len(levels):
+                next_sigma = levels[idx + 1].view(1, 1, 1).to(cond.device)
+                x = clean_action + next_sigma * pred_noise
+            else:
+                x = clean_action
+            x = x.clamp(-3.0, 3.0)
+
+        if detach_noise:
+            x = x.detach()
+        if action_count < self.action_dim:
+            x = x[:, :, :action_count]
+        elif action_count > self.action_dim:
+            x = F.pad(x, (0, action_count - self.action_dim))
+        return x
 
 
 class ActionValueCritic(nn.Module):

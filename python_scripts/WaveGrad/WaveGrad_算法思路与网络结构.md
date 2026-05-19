@@ -1,6 +1,6 @@
 # WaveGrad 算法思路与网络结构说明
 
-> 当前 WaveGrad 目录已独立出入口、配置、日志和 checkpoint，但策略数学暂时沿用从 DiffWave 复制来的扩散实现；真正的 WaveGrad denoiser/score 模型将在后续步骤替换。
+> 当前 WaveGrad 目录已独立出入口、配置、日志和 checkpoint；策略核心已改为连续噪声等级的 WaveGrad-style 动作去噪模型，外层 Webots 交互、奖励、安全过滤、replay 和 Q guidance 保持不变。
 
 ## 1. 总体思路
 
@@ -40,11 +40,11 @@ Webots 侧通过 `python_scripts/WaveGrad/wavegrad_gpu_client.py` 自动启动 G
 ```text
 choose_catch      根据当前观测返回 shoulder / arm 动作和值估计
 store_catch       存储抓取阶段 transition
-learn_catch       训练抓取阶段两个 agent
+learn_catch       训练抓取阶段 joint-action agent（action_dim=2）
 choose_tai        根据当前观测返回抬腿三个关节动作和值估计
 store_tai         存储抬腿阶段 transition
 learn_tai         训练抬腿阶段三个 agent
-save_checkpoint   保存 policy、optimizer、critic、replay 状态
+save_catch_checkpoint / save_tai_checkpoint 保存 policy、optimizer、critic、replay 状态
 ```
 
 ## 3. 训练数据流
@@ -62,7 +62,7 @@ save_checkpoint   保存 policy、optimizer、critic、replay 状态
 8. episode 结束后调用 learn_catch()
 ```
 
-抬腿阶段同理，只是动作维度由两个独立 agent 变成三个独立 agent：
+抬腿阶段同理，只是抓取阶段是一个 `action_dim=2` 的 joint-action agent，抬腿阶段是三个独立 agent：
 
 ```text
 leg_upper, leg_lower, ankle
@@ -95,16 +95,17 @@ ReLU
 Conv2d(32 -> 32)
 ReLU
 Conv2d(32 -> 32)
-FC 6272 -> 6000 -> 100
-min-max normalize
+AdaptiveAvgPool2d(14, 14)
+FC 6272 -> 1024 -> 256
+LayerNorm
 ```
 
 状态分支：
 
 ```text
 state 20 维
-FC 20 -> 100 -> 100
-min-max normalize
+FC 20 -> 128
+LayerNorm
 ```
 
 图结构分支：
@@ -113,20 +114,17 @@ min-max normalize
 GraphSAGE
 GATConv
 GraphSAGE
-GATConv
-GCNConv
 mean pooling
-FC 1000 -> 100
-min-max normalize
+FC 256 -> 128
+LayerNorm
 ```
 
 融合方式：
 
 ```text
-[image_feature, state_feature, graph_feature] -> 300 维
-FC 300 -> 200
-safety_features -> FC -> 200
-最终条件特征 = 主融合特征 + safety 特征
+[image_feature 256, state_feature 128, graph_feature 128, safety_feature 128] -> 640 维
+FC 640 -> 200
+最终条件特征 = 融合后的 200 维特征
 ```
 
 最终输出：
@@ -143,7 +141,7 @@ cond_features: [batch, 200]
 FeatureEncoder
 cond_proj: 200 -> 128
 WaveGradModel
-DiffusionScheduler
+WaveGradNoiseSchedule
 value_head: 200 -> 1
 ```
 
@@ -151,26 +149,26 @@ value_head: 200 -> 1
 
 ### 4.3 WaveGradModel
 
-`WaveGradModel` 是动作扩散模型。它接收噪声动作 `x_t`、扩散步 `t` 和条件特征 `cond`，预测噪声 `pred_noise`。
+`WaveGradModel` 是动作去噪模型。它接收 `noisy_action`、连续噪声等级 `sigma` 和条件特征 `cond`，预测噪声 `pred_noise`。
 
 结构：
 
 ```text
-input_projection: Conv1d(1 -> residual channels)
-diffusion embedding: sinusoidal embedding + MLP
-12 个 WaveGradResidualBlock
-skip connection 聚合
-output_projection: Conv1d(res_channels -> 1)
+action_projection: Linear(action_dim -> hidden_dim)
+noise embedding: log(sigma) sinusoidal embedding + MLP
+5 个 FiLM 条件残差块
+
+output_projection: Linear(hidden_dim -> action_dim)
 ```
 
 每个 residual block 包含：
 
 ```text
-dilated Conv1d
-diffusion step projection
+LayerNorm
+noise-level projection
 condition projection
-gated activation: tanh * sigmoid
-residual output + skip output
+scale/shift FiLM 调制
+residual MLP output
 ```
 
 ### 4.4 ActionValueCritic
@@ -179,9 +177,11 @@ residual output + skip output
 
 ```text
 input = [cond_features, action]
-MLP: 201 -> 128 -> 128 -> 1
+MLP: (cond_dim + action_dim) -> 128 -> 128 -> 1
 output = Q(s, a)
 ```
+
+当前 `cond_dim=200`。抓取阶段是 joint-action agent，`action_dim=2`，critic 输入维度为 202；抬腿阶段单个 agent 的 `action_dim=1`，critic 输入维度为 201。
 
 它的作用是给扩散策略提供动作方向指导：
 
@@ -196,9 +196,9 @@ output = Q(s, a)
 ```text
 1. 编码当前 image / robot_state / graph_state / safety_features
 2. value_head 输出 value estimate
-3. diffusion 独立采样 8 个候选动作
+3. 默认采样 4 个候选动作
 4. 如果 critic 已训练足够：
-       用 ActionValueCritic 评估 8 个候选动作
+       用 ActionValueCritic 评估候选动作
        选择 Q 值最高的动作
    否则：
        使用第一个 diffusion 动作
@@ -209,8 +209,8 @@ output = Q(s, a)
 Q 引导启用条件：
 
 ```text
-critic_updates >= 3
-success_replay + elite_replay >= 32
+critic_updates >= 1000
+success_replay + elite_replay >= 200
 q_candidate_count > 1
 ```
 
@@ -231,9 +231,10 @@ loss = diffusion_loss
 对真实执行过的动作加噪，模型预测噪声：
 
 ```text
-x_t = q_sample(action, t, noise)
-pred_noise = diffusion(x_t, t, cond)
-diffusion_loss = weighted_mse(pred_noise, noise)
+sigma = sample_log_uniform(sigma_min, sigma_max)
+noisy_action = action + sigma * noise
+pred_noise = denoiser(noisy_action, sigma, cond)
+diffusion_loss = weighted_mse(pred_noise, noise, reward_weight, sigma_weight)
 ```
 
 权重来自 advantage、成功标记和安全惩罚：
@@ -298,10 +299,10 @@ elite_replay           高回报 episode 的长期缓存
 
 ```text
 如果 episode 成功，进入 elite_replay。
-如果 episode_return >= 最近 100 个 episode 回报的 70% 分位数，也进入 elite_replay。
+如果 episode_return >= 最近 100 个 episode 回报的 90% 分位数，也进入 elite_replay。
 ```
 
-每次 learn 的每个 epoch 都重新采样 replay，而不是固定一批 replay 重复训练。默认 batch 大小为 128，replay 预算优先分配：
+每次 learn 的每个 epoch 都重新采样 replay，而不是固定一批 replay 重复训练。默认 `replay_batch_size` 为 64，replay 预算优先分配：
 
 ```text
 60% success_replay
