@@ -15,44 +15,40 @@ CHECKPOINT_INTERVAL = 500
 NUM_TEST_EPISODES = 200
 MAX_TEST_ATTEMPTS = 5
 MAX_TEST_INIT_FAILURES = 25
+CATCH_CANDIDATE_COUNT = 4
 
 
 def _catch_train_schedule(episode):
     if episode < 300:
         return {
             "explore_noise_std": 0.06,
-            "q_guidance_probability": 0.0,
-            "candidate_count": 4,
             "action_clip": 0.85,
+            "candidate_count": CATCH_CANDIDATE_COUNT,
         }
     if episode < 1000:
         return {
             "explore_noise_std": 0.04,
-            "q_guidance_probability": 0.5,
-            "candidate_count": 4,
             "action_clip": 0.85,
+            "candidate_count": CATCH_CANDIDATE_COUNT,
         }
     if episode < 2000:
         return {
             "explore_noise_std": 0.02,
-            "q_guidance_probability": 0.8,
-            "candidate_count": 4,
             "action_clip": 0.85,
+            "candidate_count": CATCH_CANDIDATE_COUNT,
         }
     return {
         "explore_noise_std": 0.005,
-        "q_guidance_probability": 0.7,
-        "candidate_count": 4,
         "action_clip": 0.85,
+        "candidate_count": CATCH_CANDIDATE_COUNT,
     }
 
 
 def _catch_eval_schedule():
     return {
         "explore_noise_std": 0.0,
-        "q_guidance_probability": 1.0,
-        "candidate_count": 4,
         "action_clip": 0.85,
+        "candidate_count": CATCH_CANDIDATE_COUNT,
     }
 
 
@@ -239,6 +235,72 @@ def _apply_action_safety_filter(env, robot_state, action_shoulder, action_arm):
     return float(safe_action_shoulder), float(safe_action_arm), float(safety_penalty), info
 
 
+def _score_catch_candidate(safe_action_shoulder, safe_action_arm, safety_penalty, safety_info, prev_action_shoulder, prev_action_arm):
+    # 这个分数只用安全和动作幅度启发式，不读取奖励、不训练 Q 网络。
+    executed_motion = abs(float(safety_info.get("shoulder_delta", 0.0))) + abs(float(safety_info.get("arm_delta", 0.0)))
+    action_magnitude = abs(float(safe_action_shoulder)) + abs(float(safe_action_arm))
+    action_change = abs(float(safe_action_shoulder) - float(prev_action_shoulder)) + abs(float(safe_action_arm) - float(prev_action_arm))
+    small_action_penalty = max(0.0, 0.35 - action_magnitude) * 0.35
+    infeasible_penalty = 2.0 if bool(safety_info.get("infeasible", False)) else 0.0
+    clip_penalty = 0.08 if bool(safety_info.get("clipped", False)) else 0.0
+    return float(
+        executed_motion * 2.1
+        + action_magnitude * 0.12
+        - float(safety_penalty)
+        - action_change * 0.08
+        - small_action_penalty
+        - infeasible_penalty
+        - clip_penalty
+    )
+
+
+def _select_catch_candidate(env, robot_state, action_result, prev_action_shoulder, prev_action_arm):
+    raw_default = [
+        float(action_result.get("shoulder_action", 0.0)),
+        float(action_result.get("arm_action", 0.0)),
+    ]
+    candidates = action_result.get("candidate_actions") or [raw_default]
+    if not isinstance(candidates, list) or not candidates:
+        candidates = [raw_default]
+
+    best = None
+    for idx, candidate in enumerate(candidates):
+        action_array = np.asarray(candidate, dtype=np.float32).reshape(-1)
+        if action_array.size < 2:
+            action_array = np.pad(action_array, (0, 2 - action_array.size), mode="constant")
+        raw_shoulder = float(action_array[0])
+        raw_arm = float(action_array[1])
+        safe_shoulder, safe_arm, safety_penalty, safety_info = _apply_action_safety_filter(
+            env,
+            robot_state,
+            raw_shoulder,
+            raw_arm,
+        )
+        score = _score_catch_candidate(
+            safe_shoulder,
+            safe_arm,
+            safety_penalty,
+            safety_info,
+            prev_action_shoulder,
+            prev_action_arm,
+        )
+        item = {
+            "index": idx,
+            "raw_shoulder": raw_shoulder,
+            "raw_arm": raw_arm,
+            "safe_shoulder": safe_shoulder,
+            "safe_arm": safe_arm,
+            "safety_penalty": safety_penalty,
+            "safety_info": safety_info,
+            "score": score,
+            "candidate_count": len(candidates),
+        }
+        if best is None or item["score"] > best["score"]:
+            best = item
+
+    return best
+
+
 def _get_grasp_contact(env):
     all_grasp_sensors = [
         env.darwin.get_touch_sensor_value("grasp_L1"),
@@ -336,15 +398,16 @@ def _run_wavegrad_catch_tests(env, gpu, checkpoint_episode, max_steps_per_test_e
                     deterministic_seed=12345 + valid_test_cnt * max_steps_per_test_episode + test_steps,
                     **_catch_eval_schedule()
                 )
-                action_shoulder_raw = action_result["shoulder_action"]
-                action_arm_raw = action_result["arm_action"]
-
-                action_shoulder, action_arm, _, safety_info = _apply_action_safety_filter(
+                selected_candidate = _select_catch_candidate(
                     env,
                     test_robot_state,
-                    _to_scalar(action_shoulder_raw),
-                    _to_scalar(action_arm_raw),
+                    action_result,
+                    prev_action_shoulder,
+                    prev_action_arm,
                 )
+                action_shoulder = selected_candidate["safe_shoulder"]
+                action_arm = selected_candidate["safe_arm"]
+                safety_info = selected_candidate["safety_info"]
                 if safety_info["clipped"]:
                     print(
                         f"  Test safety filter: shoulder={action_shoulder:.4f}, "
@@ -441,6 +504,13 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
             prev_action_shoulder = 0.0
             prev_action_arm = 0.0
             episode_safety_penalty = 0.0
+            episode_safety_clip_count = 0
+            episode_candidate_score_total = 0.0
+            episode_candidate_selection_count = 0
+            episode_candidate_index_total = 0.0
+            episode_action_abs_total = 0.0
+            min_distance = float("inf")
+            final_distance = float("inf")
 
             log_writer_catch.add(episode_num=episode)
             while True:
@@ -463,20 +533,29 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
                     explore=True,
                     **train_schedule
                 )
-                raw_action_shoulder = _to_scalar(action_result["shoulder_action"])
-                raw_action_arm = _to_scalar(action_result["arm_action"])
                 value_shoulder = float(action_result["shoulder_value"])
                 value_arm = float(action_result["arm_value"])
 
-                action_shoulder, action_arm, safety_penalty, safety_info = _apply_action_safety_filter(
+                selected_candidate = _select_catch_candidate(
                     env,
                     robot_state,
-                    raw_action_shoulder,
-                    raw_action_arm,
+                    action_result,
+                    prev_action_shoulder,
+                    prev_action_arm,
                 )
+                raw_action_shoulder = selected_candidate["raw_shoulder"]
+                raw_action_arm = selected_candidate["raw_arm"]
+                action_shoulder = selected_candidate["safe_shoulder"]
+                action_arm = selected_candidate["safe_arm"]
+                safety_penalty = selected_candidate["safety_penalty"]
+                safety_info = selected_candidate["safety_info"]
+                episode_candidate_score_total += float(selected_candidate["score"])
+                episode_candidate_index_total += float(selected_candidate["index"])
+                episode_candidate_selection_count += 1
                 if episode % 5 == 0:
                     print(f"Episode {episode}, step {steps}: shoulder={action_shoulder:.4f}, arm={action_arm:.4f}")
                 if safety_info["clipped"]:
+                    episode_safety_clip_count += 1
                     print(
                         "Safety filter: "
                         f"raw=({raw_action_shoulder:.4f}, {raw_action_arm:.4f}) -> "
@@ -499,6 +578,8 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
                     dy = gps_goal1[0] - gps1[1]
                     dz = gps_goal1[1] - gps1[2]
                 current_distance = (dy * dy + dz * dz) ** 0.5
+                final_distance = current_distance
+                min_distance = min(min_distance, current_distance)
 
                 if prev_distance is not None:
                     distance_improvement = prev_distance - current_distance
@@ -539,6 +620,7 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
 
                 log_writer_catch.add_action_catch(action_shoulder, action_arm)
                 episode_return += float(reward)
+                episode_action_abs_total += abs(float(action_shoulder)) + abs(float(action_arm))
                 prev_action_shoulder = action_shoulder
                 prev_action_arm = action_arm
                 steps += 1
@@ -549,10 +631,6 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
             loss_total = float(learn_info.get("loss", 0.0))
             diffusion_loss = float(learn_info.get("diffusion_loss", 0.0))
             value_loss = float(learn_info.get("value_loss", 0.0))
-            q_loss = float(learn_info.get("q_loss", 0.0))
-            q_guidance_loss = float(learn_info.get("q_guidance_loss", 0.0))
-            q_guidance_loss_used = float(learn_info.get("q_guidance_loss_used", q_guidance_loss))
-            q_guidance_loss_ratio = float(learn_info.get("q_guidance_loss_ratio", 0.0))
             policy_lr = float(learn_info.get("policy_lr", 0.0))
 
             recent_returns.append(episode_return)
@@ -562,19 +640,31 @@ def WaveGrad_episoid_1(model_path=None, max_steps_per_episode=22):
             log_writer_catch.add(loss=loss_total)
             log_writer_catch.add(diffusion_loss=diffusion_loss)
             log_writer_catch.add(value_loss=value_loss)
-            log_writer_catch.add(q_loss=q_loss)
-            log_writer_catch.add(q_guidance_loss=q_guidance_loss)
-            log_writer_catch.add(q_guidance_loss_used=q_guidance_loss_used)
-            log_writer_catch.add(q_guidance_loss_ratio=q_guidance_loss_ratio)
             log_writer_catch.add(success_replay_size=int(learn_info.get("success_replay_size", 0)))
             log_writer_catch.add(elite_replay_size=int(learn_info.get("elite_replay_size", 0)))
-            log_writer_catch.add(q_guided_used=int(learn_info.get("q_guided_used", 0)))
-            log_writer_catch.add(q_guided_action_delta=float(learn_info.get("q_guided_action_delta", 0.0)))
-            log_writer_catch.add(critic_updates=int(learn_info.get("critic_updates", 0)))
             log_writer_catch.add(policy_lr=policy_lr)
             log_writer_catch.add(return_all=episode_return)
             log_writer_catch.add(goal=success_flag1)
             log_writer_catch.add(safety_penalty=round(episode_safety_penalty, 4))
+            log_writer_catch.add(episode_steps=int(steps))
+            log_writer_catch.add(final_distance=round(final_distance if np.isfinite(final_distance) else -1.0, 4))
+            log_writer_catch.add(min_distance=round(min_distance if np.isfinite(min_distance) else -1.0, 4))
+            log_writer_catch.add(safety_clip_count=int(episode_safety_clip_count))
+            log_writer_catch.add(safety_clip_rate=round(episode_safety_clip_count / max(1, steps), 4))
+            log_writer_catch.add(candidate_count=int(train_schedule.get("candidate_count", 1)))
+            log_writer_catch.add(
+                candidate_score_mean=round(
+                    episode_candidate_score_total / max(1, episode_candidate_selection_count),
+                    4,
+                )
+            )
+            log_writer_catch.add(
+                selected_candidate_index_mean=round(
+                    episode_candidate_index_total / max(1, episode_candidate_selection_count),
+                    4,
+                )
+            )
+            log_writer_catch.add(avg_abs_catch_action=round(episode_action_abs_total / max(1, steps * 2), 4))
             if (episode + 1) % 100 == 0:
                 rolling_success_rate = 100.0 * sum(recent_successes) / max(1, len(recent_successes))
                 rolling_mean_return = sum(recent_returns) / max(1, len(recent_returns))

@@ -1,6 +1,6 @@
 # WaveGrad 算法思路与网络结构说明
 
-> 当前 WaveGrad 目录已独立出入口、配置、日志和 checkpoint；策略核心已改为连续噪声等级的 WaveGrad-style 动作去噪模型，外层 Webots 交互、奖励、安全过滤、replay 和 Q guidance 保持不变。
+> 当前 WaveGrad 目录已独立出入口、配置、日志和 checkpoint；策略核心是连续噪声等级的 WaveGrad-style 动作去噪模型。当前版本已移除额外 Q 网络和动作引导模块，外层 Webots 交互、奖励、安全过滤和 replay 保持原工程风格。
 
 ## 1. 总体思路
 
@@ -9,7 +9,7 @@
 1. Webots 负责仿真、传感器读取、动作执行、奖励计算和 episode 流程。
 2. Python 3.11 的 mission 环境作为 WaveGrad GPU 服务，负责神经网络推理、经验缓存、学习和 checkpoint。
 3. 每个 step 都根据当前图像、机器人状态、图结构状态和安全特征重新采样动作。
-4. 训练时使用奖励加权 diffusion loss，同时加入 value head 和 action-value critic 作为辅助学习信号。
+4. 训练时使用奖励加权 diffusion loss，同时加入 value head 作为回报估计辅助信号。
 5. 成功轨迹和高回报轨迹会长期保留在 replay 中，避免稀有成功样本被单个 episode 结束后的 `clear_memory()` 遗忘。
 
 核心入口关系如下：
@@ -20,7 +20,7 @@ Webots Train_main.py
         -> WaveGradGPUClient
             -> mission python 启动 wavegrad_gpu_service.py
                 -> WaveGradAgent / WaveGradTaiAgent
-                    -> WaveGradPolicy + ActionValueCritic
+                    -> WaveGradPolicy
 ```
 
 ## 2. 双 Python + GPU 运行方式
@@ -44,7 +44,7 @@ learn_catch       训练抓取阶段 joint-action agent（action_dim=2）
 choose_tai        根据当前观测返回抬腿三个关节动作和值估计
 store_tai         存储抬腿阶段 transition
 learn_tai         训练抬腿阶段三个 agent
-save_catch_checkpoint / save_tai_checkpoint 保存 policy、optimizer、critic、replay 状态
+save_catch_checkpoint / save_tai_checkpoint 保存 policy、optimizer、replay 状态
 ```
 
 ## 3. 训练数据流
@@ -145,7 +145,7 @@ WaveGradNoiseSchedule
 value_head: 200 -> 1
 ```
 
-其中 `value_head` 不是 PPO critic，不参与 PPO ratio/clip，只作为回报估计辅助 diffusion 训练。
+其中 `value_head` 不参与 PPO ratio/clip，只作为回报估计辅助 diffusion 训练。
 
 ### 4.3 WaveGradModel
 
@@ -171,24 +171,6 @@ scale/shift FiLM 调制
 residual MLP output
 ```
 
-### 4.4 ActionValueCritic
-
-`ActionValueCritic` 用于估计当前条件特征下某个动作的价值：
-
-```text
-input = [cond_features, action]
-MLP: (cond_dim + action_dim) -> 128 -> 128 -> 1
-output = Q(s, a)
-```
-
-当前 `cond_dim=200`。抓取阶段是 joint-action agent，`action_dim=2`，critic 输入维度为 202；抬腿阶段单个 agent 的 `action_dim=1`，critic 输入维度为 201。
-
-它的作用是给扩散策略提供动作方向指导：
-
-1. 训练时用 discounted return 拟合 `Q(s, a)`。
-2. 采样动作时，当 critic 已经训练到一定程度，会从多个 diffusion 候选动作里选择 Q 值最高的动作。
-3. 策略训练时加入 `q_guidance_loss = -Q(s, sampled_action)`，鼓励策略生成高 Q 动作。
-
 ## 5. 动作生成机制
 
 `WaveGradAgent.choose_action()` 的逻辑：
@@ -196,34 +178,18 @@ output = Q(s, a)
 ```text
 1. 编码当前 image / robot_state / graph_state / safety_features
 2. value_head 输出 value estimate
-3. 默认采样 4 个候选动作
-4. 如果 critic 已训练足够：
-       用 ActionValueCritic 评估候选动作
-       选择 Q 值最高的动作
-   否则：
-       使用第一个 diffusion 动作
-       训练模式下加少量高斯探索噪声
-5. 动作 clip 到 [-1, 1]
+3. WaveGrad denoiser 从噪声中采样一个动作
+4. 训练模式下加少量高斯探索噪声
+5. 动作 clip 到配置范围
 ```
-
-Q 引导启用条件：
-
-```text
-critic_updates >= 1000
-success_replay + elite_replay >= 200
-q_candidate_count > 1
-```
-
-这可以避免训练早期 critic 不准时错误引导动作。
 
 ## 6. 损失函数
 
-每个 episode 结束后调用 `learn()`。训练目标由三部分组成：
+每个 episode 结束后调用 `learn()`。训练目标由两部分组成：
 
 ```text
 loss = diffusion_loss
      + value_coef * value_loss
-     + q_coef * q_guidance_loss
 ```
 
 ### 6.1 diffusion_loss
@@ -256,26 +222,6 @@ value_loss = smooth_l1_loss(value_pred, discounted_return)
 ```
 
 使用 `smooth_l1_loss` 是为了避免成功奖励很大时 value loss 过大，压制 diffusion loss。
-
-### 6.3 q_loss
-
-critic 拟合执行动作的回报：
-
-```text
-q_loss = smooth_l1_loss(Q(cond, action), discounted_return)
-```
-
-critic 单独用 `critic_optimizer` 更新。
-
-### 6.4 q_guidance_loss
-
-冻结 critic，用当前 policy 采样动作，并最大化 critic 认为好的动作：
-
-```text
-q_guidance_loss = -mean(Q(cond, sampled_action))
-```
-
-该项让 diffusion policy 不只是模仿已有动作，还能被 critic 引导到更高回报方向。
 
 ## 7. Replay 设计
 
@@ -322,7 +268,6 @@ elite_replay           高回报 episode 的长期缓存
 
 ```text
 wavegrad_catch joint-action policy / optimizer
-wavegrad_catch joint-action critic / critic optimizer
 wavegrad_catch joint-action replay state
 catch_action_dim = 2
 episode 信息
@@ -332,9 +277,9 @@ episode 信息
 抬腿阶段 checkpoint 保存：
 
 ```text
-leg_upper policy / optimizer / critic / critic optimizer / replay
-leg_lower policy / optimizer / critic / critic optimizer / replay
-ankle policy / optimizer / critic / critic optimizer / replay
+leg_upper policy / optimizer / replay
+leg_lower policy / optimizer / replay
+ankle policy / optimizer / replay
 ```
 
 replay 只保存轻量状态：
@@ -343,7 +288,6 @@ replay 只保存轻量状态：
 最近 64 条 success_replay
 最近 64 条 elite_replay
 recent_episode_returns
-critic_updates
 ```
 
 旧 checkpoint 没有 replay 字段也可以加载，只是 replay 从空开始。
@@ -359,13 +303,8 @@ goal
 loss
 diffusion_loss
 value_loss
-q_loss
-q_guidance_loss
 success_replay_size
 elite_replay_size
-q_guided_used
-q_guided_action_delta
-critic_updates
 safety_penalty
 rolling_success_rate_100
 rolling_mean_return_100
@@ -377,8 +316,6 @@ test_grasp_success_rate
 ```text
 success_replay_size 是否持续积累成功样本
 elite_replay_size 是否持续积累高质量样本
-critic_updates 是否持续增加
-q_guided_used 是否在训练一段时间后变成 1
 rolling_success_rate_100 是否上升
 return_all 是否整体上升
 ```
@@ -399,7 +336,7 @@ PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advanta
 
 ```text
 1. 奖励加权 imitation：高回报动作 diffusion loss 权重大。
-2. critic/Q guidance：用 Q(s,a) 选择和鼓励更高价值动作。
+2. value head：辅助估计 discounted return，用于稳定回报加权。
 3. success/elite replay：让成功动作长期反复参与训练。
 ```
 
@@ -409,7 +346,6 @@ PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advanta
 奖励加权扩散策略
 + 成功轨迹回放
 + 高回报轨迹回放
-+ Q critic 动作指导
 + Webots 在线交互训练
 ```
 
@@ -421,9 +357,8 @@ PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advanta
 1. 最近 100 episode 成功率 rolling_success_rate_100
 2. 最近 100 episode 平均回报 rolling_mean_return_100
 3. success_replay_size 是否增加
-4. q_loss 是否逐渐稳定
-5. q_guided_used 是否在 critic warmup 后启用
-6. checkpoint 测试成功率 test_grasp_success_rate
+4. diffusion_loss / value_loss 是否逐渐稳定
+5. checkpoint 测试成功率 test_grasp_success_rate
 ```
 
 如果出现下面情况，说明训练链路开始有效：
@@ -431,8 +366,6 @@ PPO 的策略更新是直接提高高 advantage 动作概率、降低低 advanta
 ```text
 success_replay_size > 0
 elite_replay_size 持续增长
-critic_updates 持续增长
-q_guided_used 后期变为 1
 return_all 的高分 episode 变多
 rolling_success_rate_100 有上升趋势
 ```

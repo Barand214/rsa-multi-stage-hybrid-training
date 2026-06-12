@@ -183,9 +183,8 @@ class WaveGradGPUClient(object):
         safety_features=None,
         explore=True,
         explore_noise_std=None,
-        q_guidance_probability=1.0,
         action_clip=1.0,
-        candidate_count=None,
+        candidate_count=1,
         deterministic_eval=False,
         deterministic_seed=None,
     ):
@@ -199,9 +198,8 @@ class WaveGradGPUClient(object):
             safety_features=self._pack_optional_array(safety_features, np.float32),
             explore=bool(explore),
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=float(q_guidance_probability),
             action_clip=float(action_clip),
-            candidate_count=candidate_count,
+            candidate_count=int(candidate_count),
             deterministic_eval=bool(deterministic_eval),
             deterministic_seed=deterministic_seed,
         )
@@ -241,9 +239,7 @@ class WaveGradGPUClient(object):
         graph_state=None,
         explore=True,
         explore_noise_std=None,
-        q_guidance_probability=1.0,
         action_clip=1.0,
-        candidate_count=None,
     ):
         if graph_state is None:
             graph_state = robot_state
@@ -254,9 +250,7 @@ class WaveGradGPUClient(object):
             graph_state=self._pack_array(graph_state, np.float32),
             explore=bool(explore),
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=float(q_guidance_probability),
             action_clip=float(action_clip),
-            candidate_count=candidate_count,
         )
 
     def store_tai(
