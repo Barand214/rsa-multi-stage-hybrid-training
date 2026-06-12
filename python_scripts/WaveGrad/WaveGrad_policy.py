@@ -371,14 +371,6 @@ class WaveGradPolicy(nn.Module):
                 if cuda_rng_states is not None:
                     torch.cuda.set_rng_state_all(cuda_rng_states)
 
-    def sample_actions_with_grad(self, cond_features, action_count=None, guidance_steps=6):
-        if cond_features.dim() == 1:
-            cond_features = cond_features.unsqueeze(0)
-        cond = self.cond_proj(cond_features)
-        action_count = self.action_dim if action_count is None else max(1, int(action_count))
-        x = self._sample_from_noise(cond, action_count, steps=guidance_steps, detach_noise=False)
-        return torch.tanh(x).squeeze(1)
-
     def _format_action_tensor(self, actions, batch_size, target_device):
         actions = torch.as_tensor(actions, dtype=torch.float32, device=target_device)
         actions = actions.view(int(batch_size), -1)
@@ -414,31 +406,6 @@ class WaveGradPolicy(nn.Module):
         return x
 
 
-class ActionValueCritic(nn.Module):
-    def __init__(self, cond_dim=200, hidden_dim=128, action_dim=1):
-        super().__init__()
-        self.action_dim = max(1, int(action_dim))
-        self.net = nn.Sequential(
-            nn.Linear(cond_dim + self.action_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, cond_features, actions):
-        if cond_features.dim() == 1:
-            cond_features = cond_features.unsqueeze(0)
-        actions = torch.as_tensor(actions, dtype=torch.float32, device=cond_features.device)
-        actions = actions.view(cond_features.shape[0], -1)
-        if actions.shape[1] < self.action_dim:
-            actions = F.pad(actions, (0, self.action_dim - actions.shape[1]))
-        elif actions.shape[1] > self.action_dim:
-            actions = actions[:, : self.action_dim]
-        x = torch.cat((cond_features, actions), dim=-1)
-        return self.net(x).squeeze(-1)
-
-
 class WaveGradAgent:
     def __init__(
         self,
@@ -452,13 +419,6 @@ class WaveGradAgent:
         elite_replay_size=1000,
         replay_batch_size=64,
         advantage_temperature=2.0,
-        q_coef=0.05,
-        q_guidance_batch=8,
-        q_guidance_steps=4,
-        q_candidate_count=4,
-        q_guidance_loss_clip=20.0,
-        q_guidance_min_critic_updates=1000,
-        q_guidance_min_replay=200,
         replay_action_clip=0.85,
         min_policy_lr=1e-5,
         action_dim=1,
@@ -482,34 +442,19 @@ class WaveGradAgent:
         self.safety_weight_scale = 0.15
         self.replay_batch_size = replay_batch_size
         self.advantage_temperature = advantage_temperature
-        self.q_coef = q_coef
-        self.q_guidance_batch = q_guidance_batch
-        self.q_guidance_steps = q_guidance_steps
-        self.q_candidate_count = max(1, int(q_candidate_count))
-        self.q_guidance_loss_clip = float(q_guidance_loss_clip)
-        self.q_guidance_min_critic_updates = max(0, int(q_guidance_min_critic_updates))
-        self.q_guidance_min_replay = max(0, int(q_guidance_min_replay))
-
         self.policy = WaveGradPolicy(
             node_num=self.node_num,
             diffusion_steps=24,
             safety_dim=self.safety_dim,
             action_dim=self.action_dim,
         ).to(device)
-        self.critic = ActionValueCritic(action_dim=self.action_dim).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.lr)
         self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=self.lr_decay)
         self._clamp_policy_lr()
         self.success_replay_capacity = max(0, int(success_replay_size))
         self.success_replay = []
         self.elite_replay = deque(maxlen=elite_replay_size)
         self.recent_episode_returns = deque(maxlen=100)
-        self.critic_updates = 0
-        self.q_guided_action_count = 0
-        self.action_count_since_learn = 0
-        self.q_guided_delta_sum = 0.0
-        self.last_action_info = self._empty_action_info()
         self.last_loss_info = self._empty_loss_info()
         self.clear_memory()
 
@@ -520,9 +465,7 @@ class WaveGradAgent:
         safety_features=None,
         explore=True,
         explore_noise_std=None,
-        q_guidance_probability=1.0,
         action_clip=1.0,
-        candidate_count=None,
         deterministic_seed=None,
     ):
         if isinstance(obs, (list, tuple)) and len(obs) >= 2:
@@ -538,33 +481,17 @@ class WaveGradAgent:
         with torch.no_grad():
             features = self.policy.encode(x, state, x_graph, safety_features=safety_features)
             value = self.policy.value(features)
-            active_candidate_count = self.q_candidate_count if candidate_count is None else int(candidate_count)
-            active_candidate_count = max(1, active_candidate_count)
-            use_q_guidance = self._should_use_q_guidance(active_candidate_count, q_guidance_probability)
-            sampling_candidate_count = active_candidate_count if use_q_guidance else 1
-            candidate_features = features.expand(sampling_candidate_count, -1)
-            candidates = self.policy.sample_actions(
-                candidate_features,
+            action_tensor = self.policy.sample_actions(
+                features,
                 action_count=self.action_dim,
                 deterministic_seed=deterministic_seed,
             ).view(-1, self.action_dim)
-            base_action = candidates[0].detach().cpu().numpy().astype(np.float32)
-            action = base_action.copy()
-            q_guided_used = False
-            q_guided_delta = 0.0
-
-            if use_q_guidance:
-                q_values = self.critic(candidate_features, candidates)
-                best_idx = int(torch.argmax(q_values).item())
-                action = candidates[best_idx].detach().cpu().numpy().astype(np.float32)
-                q_guided_used = True
-                q_guided_delta = float(np.linalg.norm(action - base_action))
-            elif explore:
+            action = action_tensor[0].detach().cpu().numpy().astype(np.float32)
+            if explore:
                 noise_std = 0.04 if explore_noise_std is None else float(explore_noise_std)
                 if noise_std > 0.0:
                     action = action + np.random.normal(0.0, noise_std, size=self.action_dim).astype(np.float32)
 
-        self._record_action_info(q_guided_used, q_guided_delta)
         clip_value = max(0.01, min(1.0, float(action_clip)))
         clipped_action = np.clip(action, -clip_value, clip_value).astype(np.float32)
         if self.action_dim == 1:
@@ -685,10 +612,6 @@ class WaveGradAgent:
         total_loss = 0.0
         total_diffusion_loss = 0.0
         total_value_loss = 0.0
-        total_q_loss = 0.0
-        total_q_guidance_loss = 0.0
-        total_q_guidance_loss_used = 0.0
-        total_q_guidance_loss_ratio = 0.0
         completed_epochs = 0
         for _ in range(self.update_epochs):
             training_batch = self._make_training_batch(current_transitions)
@@ -720,109 +643,39 @@ class WaveGradAgent:
             ).view(-1, 1, self.action_dim)
             weight_tensor = torch.tensor(weights, dtype=torch.float32, device=device).view(-1, 1, 1)
 
-            q_pred = self.critic(cond_features.detach(), action_tensor.view(-1, self.action_dim))
-            q_loss = F.smooth_l1_loss(q_pred, returns_tensor)
-            self.critic_optimizer.zero_grad()
-            q_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-            self.critic_optimizer.step()
-            self.critic_updates += 1
-
+            # 使用回报加权的去噪目标训练策略，不额外训练 Q 网络。
             diffusion_loss = self.policy.diffusion_loss(action_tensor, cond_features, weight_tensor)
             value_loss = F.smooth_l1_loss(values_pred, returns_tensor)
-            q_guidance_loss = self._q_guidance_loss(cond_features.detach(), weight_tensor.detach())
-            q_guidance_loss_used = self._clip_q_guidance_loss(q_guidance_loss)
-            q_guidance_contribution = self.q_coef * q_guidance_loss_used
-            loss = diffusion_loss + self.value_coef * value_loss + q_guidance_contribution
+            loss = diffusion_loss + self.value_coef * value_loss
 
             self.optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
 
-            q_guidance_ratio = self._q_guidance_loss_ratio(
-                diffusion_loss,
-                value_loss,
-                q_guidance_contribution,
-            )
             total_loss += float(loss.item())
             total_diffusion_loss += float(diffusion_loss.item())
             total_value_loss += float(value_loss.item())
-            total_q_loss += float(q_loss.item())
-            total_q_guidance_loss += float(q_guidance_loss.item())
-            total_q_guidance_loss_used += float(q_guidance_loss_used.item())
-            total_q_guidance_loss_ratio += float(q_guidance_ratio)
             completed_epochs += 1
 
         if completed_epochs == 0:
             self.last_loss_info = self._empty_loss_info()
             self.clear_memory()
-            self._reset_action_diagnostics()
             return 0.0
 
         self.scheduler.step()
         self._clamp_policy_lr()
         avg_loss = total_loss / completed_epochs
-        action_count = max(1, self.q_guided_action_count)
         self.last_loss_info = {
             "loss": avg_loss,
             "diffusion_loss": total_diffusion_loss / completed_epochs,
             "value_loss": total_value_loss / completed_epochs,
-            "q_loss": total_q_loss / completed_epochs,
-            "q_guidance_loss": total_q_guidance_loss / completed_epochs,
-            "q_guidance_loss_used": total_q_guidance_loss_used / completed_epochs,
-            "q_guidance_loss_ratio": total_q_guidance_loss_ratio / completed_epochs,
             "success_replay_size": len(self.success_replay),
             "elite_replay_size": len(self.elite_replay),
-            "q_guided_used": int(self.q_guided_action_count > 0),
-            "q_guided_action_delta": self.q_guided_delta_sum / action_count if self.q_guided_action_count > 0 else 0.0,
-            "critic_updates": int(self.critic_updates),
             "policy_lr": self.current_policy_lr(),
         }
         self.clear_memory()
-        self._reset_action_diagnostics()
         return avg_loss
-
-    def _q_guidance_loss(self, cond_features, weights):
-        if self.q_coef <= 0 or cond_features.shape[0] == 0:
-            return torch.tensor(0.0, dtype=torch.float32, device=device)
-
-        batch_size = min(self.q_guidance_batch, cond_features.shape[0])
-        flat_weights = weights.view(-1)
-        if flat_weights.numel() > batch_size:
-            _, indices = torch.topk(flat_weights, batch_size)
-            guidance_features = cond_features[indices]
-        else:
-            guidance_features = cond_features
-
-        for param in self.critic.parameters():
-            param.requires_grad_(False)
-        try:
-            guided_actions = self.policy.sample_actions_with_grad(
-                guidance_features,
-                action_count=self.action_dim,
-                guidance_steps=self.q_guidance_steps,
-            )
-            q_values = self.critic(guidance_features, guided_actions)
-            guidance_loss = -q_values.mean()
-        finally:
-            for param in self.critic.parameters():
-                param.requires_grad_(True)
-        return guidance_loss
-
-    def _clip_q_guidance_loss(self, q_guidance_loss):
-        clip_value = float(self.q_guidance_loss_clip)
-        if clip_value <= 0.0:
-            return q_guidance_loss
-        return torch.clamp(q_guidance_loss, min=-clip_value, max=clip_value)
-
-    def _q_guidance_loss_ratio(self, diffusion_loss, value_loss, q_guidance_contribution):
-        with torch.no_grad():
-            diffusion_part = torch.abs(diffusion_loss.detach())
-            value_part = torch.abs(value_loss.detach() * self.value_coef)
-            q_part = torch.abs(q_guidance_contribution.detach())
-            denominator = diffusion_part + value_part + q_part + 1e-8
-            return float((q_part / denominator).item())
 
     def _encode_transitions(self, transitions):
         features = []
@@ -995,15 +848,8 @@ class WaveGradAgent:
             "loss": 0.0,
             "diffusion_loss": 0.0,
             "value_loss": 0.0,
-            "q_loss": 0.0,
-            "q_guidance_loss": 0.0,
-            "q_guidance_loss_used": 0.0,
-            "q_guidance_loss_ratio": 0.0,
             "success_replay_size": len(self.success_replay) if hasattr(self, "success_replay") else 0,
             "elite_replay_size": len(self.elite_replay) if hasattr(self, "elite_replay") else 0,
-            "q_guided_used": 0,
-            "q_guided_action_delta": 0.0,
-            "critic_updates": int(self.critic_updates) if hasattr(self, "critic_updates") else 0,
             "policy_lr": self.current_policy_lr() if hasattr(self, "optimizer") else 0.0,
         }
 
@@ -1016,48 +862,12 @@ class WaveGradAgent:
             return 0.0
         return float(self.optimizer.param_groups[0].get("lr", 0.0))
 
-    def _empty_action_info(self):
-        return {
-            "q_guided_used": False,
-            "q_guided_action_delta": 0.0,
-            "critic_updates": int(self.critic_updates) if hasattr(self, "critic_updates") else 0,
-        }
-
-    def _record_action_info(self, q_guided_used, q_guided_delta):
-        self.action_count_since_learn += 1
-        if q_guided_used:
-            self.q_guided_action_count += 1
-            self.q_guided_delta_sum += float(q_guided_delta)
-        self.last_action_info = {
-            "q_guided_used": bool(q_guided_used),
-            "q_guided_action_delta": float(q_guided_delta),
-            "critic_updates": int(self.critic_updates),
-        }
-
-    def _reset_action_diagnostics(self):
-        self.q_guided_action_count = 0
-        self.action_count_since_learn = 0
-        self.q_guided_delta_sum = 0.0
-
-    def _should_use_q_guidance(self, candidate_count=None, q_guidance_probability=1.0):
-        replay_size = len(self.success_replay) + len(self.elite_replay)
-        active_candidate_count = self.q_candidate_count if candidate_count is None else int(candidate_count)
-        probability = max(0.0, min(1.0, float(q_guidance_probability)))
-        return (
-            active_candidate_count > 1
-            and probability > 0.0
-            and random.random() <= probability
-            and self.critic_updates >= self.q_guidance_min_critic_updates
-            and replay_size >= self.q_guidance_min_replay
-        )
-
     def export_replay_state(self, max_items=64):
         max_items = max(0, int(max_items))
         return {
             "success_replay": [dict(item) for item in list(self.success_replay)[:max_items]],
             "elite_replay": [dict(item) for item in list(self.elite_replay)[-max_items:]],
             "recent_episode_returns": list(self.recent_episode_returns),
-            "critic_updates": int(self.critic_updates),
         }
 
     def load_replay_state(self, replay_state):
@@ -1074,10 +884,6 @@ class WaveGradAgent:
                 self.recent_episode_returns.append(float(value))
             except (TypeError, ValueError):
                 continue
-        try:
-            self.critic_updates = max(self.critic_updates, int(replay_state.get("critic_updates", 0)))
-        except (TypeError, ValueError):
-            pass
 
     def clear_memory(self):
         self.states = []

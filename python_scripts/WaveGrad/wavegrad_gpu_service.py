@@ -190,8 +190,6 @@ def _load_policy_state(
     checkpoint: Dict[str, Any],
     policy_keys: Iterable[str],
     optimizer_keys: Iterable[str],
-    critic_keys: Iterable[str] = (),
-    critic_optimizer_keys: Iterable[str] = (),
 ) -> None:
     for key in policy_keys:
         if key in checkpoint:
@@ -208,25 +206,6 @@ def _load_policy_state(
             except Exception as exc:
                 print("Skipped incompatible optimizer state %s: %s" % (key, exc), flush=True)
             break
-
-    if hasattr(agent, "critic"):
-        for key in critic_keys:
-            if key in checkpoint:
-                try:
-                    _load_compatible_module_state(agent.critic, checkpoint[key], key)
-                except Exception as exc:
-                    print("Skipped incompatible critic state %s: %s" % (key, exc), flush=True)
-                break
-
-    if hasattr(agent, "critic_optimizer"):
-        for key in critic_optimizer_keys:
-            if key in checkpoint:
-                try:
-                    agent.critic_optimizer.load_state_dict(checkpoint[key])
-                    _move_optimizer_state_to_device(agent.critic_optimizer)
-                except Exception as exc:
-                    print("Skipped incompatible critic optimizer state %s: %s" % (key, exc), flush=True)
-                break
 
 
 def _load_compatible_module_state(module: torch.nn.Module, state_dict: Any, label: str) -> None:
@@ -388,8 +367,6 @@ class WaveGradGPUService:
                         checkpoint,
                         policy_keys=("wavegrad_catch", "policy_catch"),
                         optimizer_keys=("optimizer_wavegrad_catch", "optimizer_catch"),
-                        critic_keys=("critic_wavegrad_catch",),
-                        critic_optimizer_keys=("optimizer_critic_wavegrad_catch",),
                     )
                     self.wavegrad_catch.load_replay_state(checkpoint.get("replay_wavegrad_catch"))
                 else:
@@ -405,12 +382,10 @@ class WaveGradGPUService:
                         checkpoint,
                         policy_keys=legacy_catch_policy_keys,
                         optimizer_keys=(),
-                        critic_keys=(),
-                        critic_optimizer_keys=(),
                     )
                     print(
                         "Loaded compatible legacy catch policy into joint-action agent; "
-                        "critic, optimizer, and replay were reinitialized.",
+                        "optimizer and replay were reinitialized.",
                         flush=True,
                     )
                 checkpoint_episode = int(checkpoint.get("episode", _catch_checkpoint_sort_key(target_model)[0]))
@@ -468,24 +443,18 @@ class WaveGradGPUService:
                     checkpoint,
                     policy_keys=("wavegrad_tai_leg_upper", "policy_LegUpper"),
                     optimizer_keys=("optimizer_wavegrad_tai_leg_upper", "optimizer_LegUpper"),
-                    critic_keys=("critic_wavegrad_tai_leg_upper",),
-                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_leg_upper",),
                 )
                 _load_policy_state(
                     self.wavegrad_tai_leg_lower,
                     checkpoint,
                     policy_keys=("wavegrad_tai_leg_lower", "policy_LegLower"),
                     optimizer_keys=("optimizer_wavegrad_tai_leg_lower", "optimizer_LegLower"),
-                    critic_keys=("critic_wavegrad_tai_leg_lower",),
-                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_leg_lower",),
                 )
                 _load_policy_state(
                     self.wavegrad_tai_ankle,
                     checkpoint,
                     policy_keys=("wavegrad_tai_ankle", "policy_Ankle"),
                     optimizer_keys=("optimizer_wavegrad_tai_ankle", "optimizer_Ankle"),
-                    critic_keys=("critic_wavegrad_tai_ankle",),
-                    critic_optimizer_keys=("optimizer_critic_wavegrad_tai_ankle",),
                 )
                 self.wavegrad_tai_leg_upper.load_replay_state(checkpoint.get("replay_wavegrad_tai_leg_upper"))
                 self.wavegrad_tai_leg_lower.load_replay_state(checkpoint.get("replay_wavegrad_tai_leg_lower"))
@@ -522,14 +491,6 @@ class WaveGradGPUService:
             np.zeros(19, dtype=np.float32),
         ]
 
-    def _action_info(self, agent: Any) -> Dict[str, Any]:
-        info = getattr(agent, "last_action_info", {}) or {}
-        return {
-            "q_guided_used": bool(info.get("q_guided_used", False)),
-            "q_guided_action_delta": float(info.get("q_guided_action_delta", 0.0)),
-            "critic_updates": int(info.get("critic_updates", 0)),
-        }
-
     def choose_catch(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         self._require_agents()
         assert self.wavegrad_catch is not None
@@ -542,9 +503,7 @@ class WaveGradGPUService:
             safety_features = self._as_float_array(safety_features, np.float32)
         explore = bool(kwargs.get("explore", True))
         explore_noise_std = kwargs.get("explore_noise_std")
-        q_guidance_probability = float(kwargs.get("q_guidance_probability", 1.0))
         action_clip = float(kwargs.get("action_clip", 1.0))
-        candidate_count = kwargs.get("candidate_count")
         deterministic_eval = bool(kwargs.get("deterministic_eval", False))
         deterministic_seed = kwargs.get("deterministic_seed")
         joint_seed = None
@@ -557,9 +516,7 @@ class WaveGradGPUService:
             safety_features=safety_features,
             explore=explore,
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=q_guidance_probability,
             action_clip=action_clip,
-            candidate_count=candidate_count,
             deterministic_seed=joint_seed,
         )
         joint_action = np.asarray(joint_action, dtype=np.float32).reshape(-1)
@@ -567,18 +524,11 @@ class WaveGradGPUService:
             joint_action = np.pad(joint_action, (0, 2 - joint_action.size), mode="constant")
         shoulder_action = float(joint_action[0])
         arm_action = float(joint_action[1])
-        catch_info = self._action_info(self.wavegrad_catch)
         return {
             "shoulder_action": shoulder_action,
             "shoulder_value": float(joint_value),
             "arm_action": arm_action,
             "arm_value": float(joint_value),
-            "q_guided_used": bool(catch_info["q_guided_used"]),
-            "q_guided_action_delta": float(catch_info["q_guided_action_delta"]),
-            "critic_updates": int(catch_info["critic_updates"]),
-            "shoulder_action_info": dict(catch_info),
-            "arm_action_info": dict(catch_info),
-            "catch_action_info": catch_info,
         }
 
     def store_catch(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -637,40 +587,29 @@ class WaveGradGPUService:
         graph_state = self._as_float_array(kwargs.get("graph_state", robot_state), np.float32)
         explore = bool(kwargs.get("explore", True))
         explore_noise_std = kwargs.get("explore_noise_std")
-        q_guidance_probability = float(kwargs.get("q_guidance_probability", 1.0))
         action_clip = float(kwargs.get("action_clip", 1.0))
-        candidate_count = kwargs.get("candidate_count")
 
         leg_upper_action, leg_upper_value = self.wavegrad_tai_leg_upper.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=q_guidance_probability,
             action_clip=action_clip,
-            candidate_count=candidate_count,
         )
         leg_lower_action, leg_lower_value = self.wavegrad_tai_leg_lower.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=q_guidance_probability,
             action_clip=action_clip,
-            candidate_count=candidate_count,
         )
         ankle_action, ankle_value = self.wavegrad_tai_ankle.choose_action(
             obs=(image, robot_state),
             x_graph=graph_state,
             explore=explore,
             explore_noise_std=explore_noise_std,
-            q_guidance_probability=q_guidance_probability,
             action_clip=action_clip,
-            candidate_count=candidate_count,
         )
-        upper_info = self._action_info(self.wavegrad_tai_leg_upper)
-        lower_info = self._action_info(self.wavegrad_tai_leg_lower)
-        ankle_info = self._action_info(self.wavegrad_tai_ankle)
         return {
             "leg_upper_action": float(leg_upper_action),
             "leg_upper_value": float(leg_upper_value),
@@ -678,23 +617,6 @@ class WaveGradGPUService:
             "leg_lower_value": float(leg_lower_value),
             "ankle_action": float(ankle_action),
             "ankle_value": float(ankle_value),
-            "q_guided_used": bool(
-                upper_info["q_guided_used"] or lower_info["q_guided_used"] or ankle_info["q_guided_used"]
-            ),
-            "q_guided_action_delta": float(
-                (
-                    upper_info["q_guided_action_delta"]
-                    + lower_info["q_guided_action_delta"]
-                    + ankle_info["q_guided_action_delta"]
-                )
-                / 3.0
-            ),
-            "critic_updates": int(
-                upper_info["critic_updates"] + lower_info["critic_updates"] + ankle_info["critic_updates"]
-            ),
-            "leg_upper_action_info": upper_info,
-            "leg_lower_action_info": lower_info,
-            "ankle_action_info": ankle_info,
         }
 
     def store_tai(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -755,22 +677,8 @@ class WaveGradGPUService:
             "loss": float(sum(losses)),
             "diffusion_loss": float(sum(agent.last_loss_info.get("diffusion_loss", 0.0) for agent in agents)),
             "value_loss": float(sum(agent.last_loss_info.get("value_loss", 0.0) for agent in agents)),
-            "q_loss": float(sum(agent.last_loss_info.get("q_loss", 0.0) for agent in agents)),
-            "q_guidance_loss": float(sum(agent.last_loss_info.get("q_guidance_loss", 0.0) for agent in agents)),
-            "q_guidance_loss_used": float(
-                sum(agent.last_loss_info.get("q_guidance_loss_used", 0.0) for agent in agents)
-            ),
-            "q_guidance_loss_ratio": float(
-                sum(agent.last_loss_info.get("q_guidance_loss_ratio", 0.0) for agent in agents)
-                / max(1, len(agents))
-            ),
             "success_replay_size": int(sum(agent.last_loss_info.get("success_replay_size", 0) for agent in agents)),
             "elite_replay_size": int(sum(agent.last_loss_info.get("elite_replay_size", 0) for agent in agents)),
-            "q_guided_used": int(any(agent.last_loss_info.get("q_guided_used", 0) for agent in agents)),
-            "q_guided_action_delta": float(
-                sum(agent.last_loss_info.get("q_guided_action_delta", 0.0) for agent in agents) / max(1, len(agents))
-            ),
-            "critic_updates": int(sum(agent.last_loss_info.get("critic_updates", 0) for agent in agents)),
             "policy_lr": float(
                 sum(agent.last_loss_info.get("policy_lr", 0.0) for agent in agents) / max(1, len(agents))
             ),
@@ -798,8 +706,6 @@ class WaveGradGPUService:
         checkpoint = {
             "wavegrad_catch": self.wavegrad_catch.policy.state_dict(),
             "optimizer_wavegrad_catch": self.wavegrad_catch.optimizer.state_dict(),
-            "critic_wavegrad_catch": self.wavegrad_catch.critic.state_dict(),
-            "optimizer_critic_wavegrad_catch": self.wavegrad_catch.critic_optimizer.state_dict(),
             "replay_wavegrad_catch": self.wavegrad_catch.export_replay_state(max_items=64),
             "catch_action_dim": int(self.wavegrad_catch.action_dim),
             "episode": episode,
@@ -843,18 +749,12 @@ class WaveGradGPUService:
             "episode": tai_episode,
             "wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.policy.state_dict(),
             "optimizer_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.optimizer.state_dict(),
-            "critic_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.critic.state_dict(),
-            "optimizer_critic_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.critic_optimizer.state_dict(),
             "replay_wavegrad_tai_leg_upper": self.wavegrad_tai_leg_upper.export_replay_state(max_items=64),
             "wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.policy.state_dict(),
             "optimizer_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.optimizer.state_dict(),
-            "critic_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.critic.state_dict(),
-            "optimizer_critic_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.critic_optimizer.state_dict(),
             "replay_wavegrad_tai_leg_lower": self.wavegrad_tai_leg_lower.export_replay_state(max_items=64),
             "wavegrad_tai_ankle": self.wavegrad_tai_ankle.policy.state_dict(),
             "optimizer_wavegrad_tai_ankle": self.wavegrad_tai_ankle.optimizer.state_dict(),
-            "critic_wavegrad_tai_ankle": self.wavegrad_tai_ankle.critic.state_dict(),
-            "optimizer_critic_wavegrad_tai_ankle": self.wavegrad_tai_ankle.critic_optimizer.state_dict(),
             "replay_wavegrad_tai_ankle": self.wavegrad_tai_ankle.export_replay_state(max_items=64),
         }
         base_dir = path_list["model_path_tai_WaveGrad"]
@@ -878,12 +778,8 @@ class WaveGradGPUService:
                 continue
             if mode == "eval":
                 agent.policy.eval()
-                if hasattr(agent, "critic"):
-                    agent.critic.eval()
             else:
                 agent.policy.train()
-                if hasattr(agent, "critic"):
-                    agent.critic.train()
         return {"stage": stage, "mode": mode}
 
     def dispatch(self, cmd: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:

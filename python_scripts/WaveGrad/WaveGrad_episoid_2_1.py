@@ -8,28 +8,20 @@ def _tai_train_schedule(episode):
     if episode < 300:
         return {
             "explore_noise_std": 0.06,
-            "q_guidance_probability": 0.0,
-            "candidate_count": 4,
             "action_clip": 0.85,
         }
     if episode < 1000:
         return {
             "explore_noise_std": 0.04,
-            "q_guidance_probability": 0.5,
-            "candidate_count": 4,
             "action_clip": 0.85,
         }
     if episode < 2000:
         return {
             "explore_noise_std": 0.02,
-            "q_guidance_probability": 0.8,
-            "candidate_count": 4,
             "action_clip": 0.85,
         }
     return {
         "explore_noise_std": 0.005,
-        "q_guidance_probability": 0.95,
-        "candidate_count": 4,
         "action_clip": 0.85,
     }
 
@@ -146,16 +138,8 @@ def WaveGrad_tai_episoid(
             log_writer_tai.add(loss=float(learn_info.get("loss", 0.0)))
             log_writer_tai.add(diffusion_loss=float(learn_info.get("diffusion_loss", 0.0)))
             log_writer_tai.add(value_loss=float(learn_info.get("value_loss", 0.0)))
-            log_writer_tai.add(q_loss=float(learn_info.get("q_loss", 0.0)))
-            q_guidance_loss = float(learn_info.get("q_guidance_loss", 0.0))
-            log_writer_tai.add(q_guidance_loss=q_guidance_loss)
-            log_writer_tai.add(q_guidance_loss_used=float(learn_info.get("q_guidance_loss_used", q_guidance_loss)))
-            log_writer_tai.add(q_guidance_loss_ratio=float(learn_info.get("q_guidance_loss_ratio", 0.0)))
             log_writer_tai.add(success_replay_size=int(learn_info.get("success_replay_size", 0)))
             log_writer_tai.add(elite_replay_size=int(learn_info.get("elite_replay_size", 0)))
-            log_writer_tai.add(q_guided_used=int(learn_info.get("q_guided_used", 0)))
-            log_writer_tai.add(q_guided_action_delta=float(learn_info.get("q_guided_action_delta", 0.0)))
-            log_writer_tai.add(critic_updates=int(learn_info.get("critic_updates", 0)))
             log_writer_tai.add(return_all=return_all)
             log_writer_tai.add(goal=goal)
 
