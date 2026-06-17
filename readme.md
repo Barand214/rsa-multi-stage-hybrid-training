@@ -23,7 +23,7 @@ PYTHON_37_EXPECTED = os.path.join(WEBOTS_CONDA_ENV, "python.exe")
 
 环境重置机制没有变：训练控制器和 Supervisor 控制器还是两个独立 Python 进程，它们不直接共享变量，而是通过 `resetFlag.txt` 文件通信。训练进程写入 `0` 请求重置，Supervisor 检测到 `0` 后重置仿真，再写回 `1` 表示完成。
 
-如果多人共享同一个 GitHub 仓库，建议让 Git 停止跟踪 `python_scripts/Project_config.py`，避免每个人的本机路径互相覆盖。在项目根目录打开 Git Bash，然后执行：
+如果多人共享同一个 GitHub 仓库，建议让 Git 停止跟踪 `python_scripts/`，避免每个人的本机路径互相覆盖。在项目根目录打开 Git Bash，然后执行：
 
 ```bash
 git rm --cached python_scripts/Project_config.py

@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import warnings
 from pathlib import Path
 
@@ -46,16 +45,30 @@ COLORS = {
 }
 
 
-DEFAULT_LOG_PATH = Path("python_scripts/DiffWave/log/catch_log/catch_log_23.json")
-DEFAULT_OUTPUT_DIR = Path("paper_plots/diffwave_catch_log_23")
+DEFAULT_LOG_DIR = Path("python_scripts/WaveGrad/log/catch_log")
+DEFAULT_OUTPUT_ROOT = Path("paper_plots/wavegrad")
 
 
-def load_diffwave_json(log_path):
+def find_latest_wavegrad_log(log_dir=DEFAULT_LOG_DIR):
+    log_dir = Path(log_dir)
+    candidates = []
+    for log_path in log_dir.glob("catch_log_*.json"):
+        try:
+            log_number = int(log_path.stem.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        candidates.append((log_number, log_path))
+    if not candidates:
+        raise FileNotFoundError(f"No WaveGrad catch logs found in {log_dir}")
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def load_wavegrad_json(log_path):
     log_path = Path(log_path)
     with log_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError("DiffWave log must be a JSON object.")
+        raise ValueError("WaveGrad log must be a JSON object.")
     return data
 
 
@@ -112,6 +125,18 @@ def rolling_mean(values, window):
 
 def rolling_rate_binary(values, window):
     return rolling_mean(values, window) * 100.0
+
+
+def _logged_metric_x(data, value_count, interval=100):
+    episodes = _as_float_array(data.get("episode_num"))
+    matching = episodes[np.isfinite(episodes) & (((episodes + 1) % interval) == 0)]
+    if matching.size >= value_count:
+        return matching[-value_count:]
+    if episodes.size > 0 and np.any(np.isfinite(episodes)):
+        first_episode = int(episodes[np.isfinite(episodes)][0])
+        first_logged = ((first_episode // interval) + 1) * interval - 1
+        return first_logged + np.arange(value_count) * interval
+    return np.arange(value_count) * interval + interval - 1
 
 
 def episode_action_stats(action_sequences, saturation_value=0.85, saturation_tol=1e-6):
@@ -196,7 +221,7 @@ def _plot_success_rate(data, output_dir, window_size):
         rolling_success = _as_float_array(data.get("rolling_success_rate_100"))
         rolling_success = rolling_success[np.isfinite(rolling_success)]
         if rolling_success.size > 0:
-            rolling_x = np.arange(rolling_success.size) * 100 + 99
+            rolling_x = _logged_metric_x(data, rolling_success.size)
 
     if not has_goal and rolling_success is None:
         print("Skipped 02_success_rate: missing goal and rolling_success_rate_100")
@@ -268,8 +293,6 @@ def _plot_losses(data, output_dir, window_size):
         ("loss", "Total loss", COLORS["red"]),
         ("diffusion_loss", "Diffusion loss", COLORS["blue"]),
         ("value_loss", "Value loss", COLORS["green"]),
-        ("q_loss", "Q loss", COLORS["purple"]),
-        ("q_guidance_loss", "Q guidance loss", COLORS["orange"]),
     ]
 
     x_base = _as_float_array(data.get("episode_num"))
@@ -314,13 +337,13 @@ def _plot_losses(data, output_dir, window_size):
     save_figure(fig, output_dir, "04_losses")
 
 
-def _plot_replay_q_guidance(data, output_dir, window_size):
+def _plot_replay_buffers(data, output_dir):
     x_base = _as_float_array(data.get("episode_num"))
     if x_base.size == 0:
-        print("Skipped 05_replay_q_guidance: missing episode_num")
+        print("Skipped 05_replay_buffers: missing episode_num")
         return
 
-    fig, axes = plt.subplots(3, 1, figsize=(9, 10), dpi=300, sharex=True)
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
     plotted_any = False
 
     for field, label, color in [
@@ -330,55 +353,55 @@ def _plot_replay_q_guidance(data, output_dir, window_size):
         y = _as_float_array(data.get(field))
         n = min(len(x_base), len(y))
         if n > 0:
-            axes[0].plot(x_base[:n], y[:n], color=color, linewidth=1.8, label=label)
+            ax.plot(x_base[:n], y[:n], color=color, linewidth=1.8, label=label)
             plotted_any = True
-
-    for field, label, color in [
-        ("q_guided_used", "Q guided used", COLORS["green"]),
-        ("q_guided_action_delta", "Q guided action delta", COLORS["purple"]),
-    ]:
-        y = _as_float_array(data.get(field))
-        n = min(len(x_base), len(y))
-        if n > 0:
-            axes[1].plot(
-                x_base[:n],
-                rolling_mean(y[:n], window_size),
-                color=color,
-                linewidth=1.8,
-                label=label,
-            )
-            plotted_any = True
-
-    y = _as_float_array(data.get("critic_updates"))
-    n = min(len(x_base), len(y))
-    if n > 0:
-        axes[2].plot(x_base[:n], y[:n], color=COLORS["orange"], linewidth=1.8, label="Critic updates")
-        plotted_any = True
 
     if not plotted_any:
         plt.close(fig)
-        print("Skipped 05_replay_q_guidance: no replay or Q guidance fields found")
+        print("Skipped 05_replay_buffers: no replay fields found")
         return
 
-    _finish_axis(axes[0], "Replay Buffers", "Episode", "Transitions", legend=True)
-    _finish_axis(axes[1], "Q Guidance", "Episode", "Rolling value", legend=True)
-    _finish_axis(axes[2], "Critic Updates", "Episode", "Updates", legend=True)
+    _finish_axis(ax, "Replay Buffers", "Episode", "Transitions", legend=True)
     fig.tight_layout()
-    save_figure(fig, output_dir, "05_replay_q_guidance")
+    save_figure(fig, output_dir, "05_replay_buffers")
 
 
 def _plot_safety_penalty(data, output_dir, window_size):
-    x, y = _aligned_xy(data, "episode_num", "safety_penalty")
-    if x is None:
-        print("Skipped 06_safety_penalty: missing safety_penalty")
+    penalty_x, penalty = _aligned_xy(data, "episode_num", "safety_penalty")
+    clip_x, clip_rate = _aligned_xy(data, "episode_num", "safety_clip_rate")
+    if penalty_x is None and clip_x is None:
+        print("Skipped 06_safety_metrics: missing safety metrics")
         return
 
-    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
-    ax.plot(x, y, color=COLORS["gray"], linewidth=0.7, alpha=0.28, label="Episode safety penalty")
-    ax.plot(x, rolling_mean(y, window_size), color=COLORS["red"], linewidth=2.0, label=f"Rolling mean ({window_size})")
-    _finish_axis(ax, "Safety Penalty", "Episode", "Penalty")
+    fig, axes = plt.subplots(2, 1, figsize=(9, 8), dpi=300, sharex=True)
+    if penalty_x is not None:
+        axes[0].plot(
+            penalty_x,
+            penalty,
+            color=COLORS["gray"],
+            linewidth=0.7,
+            alpha=0.28,
+            label="Episode safety penalty",
+        )
+        axes[0].plot(
+            penalty_x,
+            rolling_mean(penalty, window_size),
+            color=COLORS["red"],
+            linewidth=2.0,
+            label=f"Rolling mean ({window_size})",
+        )
+    if clip_x is not None:
+        axes[1].plot(
+            clip_x,
+            rolling_mean(clip_rate, window_size) * 100.0,
+            color=COLORS["blue"],
+            linewidth=2.0,
+            label="Safety clip rate",
+        )
+    _finish_axis(axes[0], "Safety Penalty", "Episode", "Penalty", legend=penalty_x is not None)
+    _finish_axis(axes[1], "Safety Clip Rate", "Episode", "Clip rate (%)", legend=clip_x is not None)
     fig.tight_layout()
-    save_figure(fig, output_dir, "06_safety_penalty")
+    save_figure(fig, output_dir, "06_safety_metrics")
 
 
 def _plot_action_statistics(data, output_dir, window_size):
@@ -446,7 +469,7 @@ def _plot_logged_rolling_return(data, output_dir):
         print("Skipped 08_logged_rolling_return: missing rolling_mean_return_100")
         return
 
-    x = np.arange(rolling_return.size) * 100 + 99
+    x = _logged_metric_x(data, rolling_return.size)
     fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
     ax.plot(
         x,
@@ -462,11 +485,66 @@ def _plot_logged_rolling_return(data, output_dir):
     save_figure(fig, output_dir, "08_logged_rolling_return")
 
 
-def plot_all_diffwave_metrics(log_path=DEFAULT_LOG_PATH, output_dir=DEFAULT_OUTPUT_DIR, window_size=100):
-    data = load_diffwave_json(log_path)
+def _plot_distance_metrics(data, output_dir, window_size):
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
+    plotted_any = False
+    for field, label, color in [
+        ("final_distance", "Final distance", COLORS["red"]),
+        ("min_distance", "Minimum distance", COLORS["blue"]),
+    ]:
+        x, y = _aligned_xy(data, "episode_num", field)
+        if x is None:
+            continue
+        ax.plot(x, rolling_mean(y, window_size), color=color, linewidth=1.8, label=label)
+        plotted_any = True
+    if not plotted_any:
+        plt.close(fig)
+        print("Skipped 09_distance_metrics: missing distance fields")
+        return
+    _finish_axis(ax, "Catch Distance", "Episode", "Distance", legend=True)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "09_distance_metrics")
+
+
+def _plot_policy_lr(data, output_dir):
+    x, y = _aligned_xy(data, "episode_num", "policy_lr")
+    if x is None:
+        print("Skipped 10_policy_lr: missing policy_lr")
+        return
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
+    ax.plot(x, y, color=COLORS["purple"], linewidth=1.8, label="Policy learning rate")
+    _finish_axis(ax, "Policy Learning Rate", "Episode", "Learning rate", legend=True)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "10_policy_lr")
+
+
+def _plot_candidate_scoring(data, output_dir, window_size):
+    fields = [
+        ("candidate_score_mean", "Candidate score mean", COLORS["red"]),
+        ("selected_candidate_index_mean", "Selected candidate index mean", COLORS["blue"]),
+    ]
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=300)
+    plotted_any = False
+    for field, label, color in fields:
+        x, y = _aligned_xy(data, "episode_num", field)
+        if x is None:
+            continue
+        ax.plot(x, rolling_mean(y, window_size), color=color, linewidth=1.8, label=label)
+        plotted_any = True
+    if not plotted_any:
+        plt.close(fig)
+        print("Skipped 11_candidate_scoring: candidate scoring is not enabled")
+        return
+    _finish_axis(ax, "Candidate Scoring", "Episode", "Score / index", legend=True)
+    fig.tight_layout()
+    save_figure(fig, output_dir, "11_candidate_scoring")
+
+
+def plot_all_wavegrad_metrics(log_path, output_dir, window_size=100):
+    data = load_wavegrad_json(log_path)
     output_dir = Path(output_dir)
 
-    print(f"Loaded DiffWave log: {Path(log_path)}")
+    print(f"Loaded WaveGrad log: {Path(log_path)}")
     print(f"Output directory: {output_dir}")
     print(f"Available fields: {', '.join(data.keys())}")
 
@@ -474,21 +552,31 @@ def plot_all_diffwave_metrics(log_path=DEFAULT_LOG_PATH, output_dir=DEFAULT_OUTP
     _plot_success_rate(data, output_dir, window_size)
     _plot_test_success(data, output_dir)
     _plot_losses(data, output_dir, window_size)
-    _plot_replay_q_guidance(data, output_dir, window_size)
+    _plot_replay_buffers(data, output_dir)
     _plot_safety_penalty(data, output_dir, window_size)
+    _plot_action_statistics(data, output_dir, window_size)
+    _plot_logged_rolling_return(data, output_dir)
+    _plot_distance_metrics(data, output_dir, window_size)
+    _plot_policy_lr(data, output_dir)
+    _plot_candidate_scoring(data, output_dir, window_size)
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Plot DiffWave JSON training logs.")
+    parser = argparse.ArgumentParser(description="Plot WaveGrad catch training logs.")
     parser.add_argument(
         "--log",
-        default=str(DEFAULT_LOG_PATH),
-        help="Path to a DiffWave JSON log file.",
+        default=None,
+        help="Path to a WaveGrad JSON log. The latest catch log is used when omitted.",
     )
     parser.add_argument(
         "--output",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="Directory for PNG and SVG outputs.",
+        default=None,
+        help="Output directory. Defaults to paper_plots/wavegrad/<experiment name>.",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Experiment name used for the default output directory.",
     )
     parser.add_argument(
         "--window",
@@ -501,4 +589,7 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
-    plot_all_diffwave_metrics(args.log, args.output, args.window)
+    selected_log = Path(args.log) if args.log else find_latest_wavegrad_log()
+    experiment_name = args.name or selected_log.stem
+    selected_output = Path(args.output) if args.output else DEFAULT_OUTPUT_ROOT / experiment_name
+    plot_all_wavegrad_metrics(selected_log, selected_output, args.window)
