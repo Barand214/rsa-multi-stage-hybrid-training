@@ -244,7 +244,6 @@ elite_replay           高回报 episode 的长期缓存
 高回报轨迹保留策略：
 
 ```text
-如果 episode 成功，进入 elite_replay。
 如果 episode_return >= 最近 100 个 episode 回报的 90% 分位数，也进入 elite_replay。
 ```
 

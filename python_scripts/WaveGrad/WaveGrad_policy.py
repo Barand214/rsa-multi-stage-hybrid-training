@@ -659,7 +659,7 @@ class WaveGradAgent:
             ).view(-1, 1, self.action_dim)
             weight_tensor = torch.tensor(weights, dtype=torch.float32, device=device).view(-1, 1, 1)
 
-            # 保留原工程的回报加权 imitation 思路，不再额外训练 Q 网络做动作引导。
+            # 使用回报加权的去噪目标训练策略，不额外训练 Q 网络。
             diffusion_loss = self.policy.diffusion_loss(action_tensor, cond_features, weight_tensor)
             value_loss = F.smooth_l1_loss(values_pred, returns_tensor)
             loss = diffusion_loss + self.value_coef * value_loss
