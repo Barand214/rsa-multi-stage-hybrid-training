@@ -423,7 +423,7 @@ def DiffWave_episoid_1(model_path=None, max_steps_per_episode=22):
     best_test_success_rate = float(init_info.get("best_catch_test_success_rate", -1.0))
 
     try:
-        for episode in range(episode_start, episode_start + 10000):
+        for episode in range(episode_start, episode_start + 5001):
             print(f"<<<<<<<<< DiffWave episode {episode}")
             train_schedule = _catch_train_schedule(episode)
             env.reset()
