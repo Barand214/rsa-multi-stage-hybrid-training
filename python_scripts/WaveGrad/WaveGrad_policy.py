@@ -399,10 +399,10 @@ class WaveGradPolicy(nn.Module):
 
         if detach_noise:
             x = x.detach()
-        if action_count < self.action_dim:
-            x = x[:, :, :action_count]
-        elif action_count > self.action_dim:
-            x = F.pad(x, (0, action_count - self.action_dim))
+        # if action_count < self.action_dim:
+        #     x = x[:, :, :action_count]
+        # elif action_count > self.action_dim:
+        #     x = F.pad(x, (0, action_count - self.action_dim))
         return x
 
 
@@ -490,7 +490,7 @@ class WaveGradAgent:
             candidate_features = features.expand(active_candidate_count, -1)
             action_tensor = self.policy.sample_actions(
                 candidate_features,
-                action_count=self.action_dim,
+                action_count=None,
                 deterministic_seed=deterministic_seed,
             ).view(active_candidate_count, self.action_dim)
             candidate_actions = action_tensor.detach().cpu().numpy().astype(np.float32)
